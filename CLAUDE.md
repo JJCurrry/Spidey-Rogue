@@ -5,7 +5,7 @@
 > 不要靠聊天记录；记忆都在 `docs/` 里。
 
 ## 项目一句话
-终端（ASCII）Roguelike 地牢探险。一个人用标准 AI Coding 方式持续迭代。
+终端（ASCII）Roguelike 地牢探险；以「最新蜘蛛侠（Spider-Man，MCU 荷兰弟 / Tom Holland 风格）」为主角与美术基调（红蓝战衣、蛛网摆荡、纽约都市地牢）。一个人用标准 AI Coding 方式持续迭代。
 
 ## 技术栈（决策见 ADR-001）
 - 语言：Python 3.11+；测试：unittest（零依赖）；渲染：终端 ASCII

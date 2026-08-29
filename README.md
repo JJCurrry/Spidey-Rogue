@@ -1,4 +1,4 @@
-# roguelike-ai-coding · 用 AI Coding 标准方法从 0 做的终端 Roguelike
+# roguelike-ai-coding · 用 AI Coding 标准方法从 0 做的「MCU 荷兰弟版蜘蛛侠主题」终端 Roguelike
 
 > 这是一个**示范仓库**：把培训 `ai-coding-method` 的「七件套制品 + 流水线」
 > 落到一个能跑、能提交、能被门禁拦下的真实游戏项目上。
@@ -46,7 +46,7 @@ python scripts/review_pipeline.py
 
 ## 2. 在新工作空间开新会话时，贴这段话
 
-> 这是一个用 AI Coding 方法开发的终端 Roguelike（仓库 `roguelike-ai-coding`）。
+> 这是一个用 AI Coding 方法开发、以**MCU 荷兰弟（Tom Holland）版蜘蛛侠（Spider-Man）**为主角的终端 Roguelike（仓库 `roguelike-ai-coding`）。
 > 请先读根目录 `CLAUDE.md`，再按 `docs/工单/` 和 `docs/接力/` 接手下一个里程碑。
 > 改动前先跑 `python scripts/gate.py`，全绿才能提交；
 > **禁止裸调 `random`/`secrets`/`os.urandom`**——随机必须走 `src/rogue/rng.py` 的 `RandomSource`（Seed 注入）。
