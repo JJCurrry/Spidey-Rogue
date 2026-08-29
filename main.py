@@ -1,6 +1,6 @@
-"""终端 Roguelike 演示入口（M1：渲染 + 示例移动）。
+"""终端 Roguelike 演示入口（M1 移动 + M2 战斗）。
 
-运行：python main.py
+主题：MCU 荷兰弟（Tom Holland）版蜘蛛侠。运行：python main.py
 """
 from __future__ import annotations
 import os
@@ -14,14 +14,25 @@ from rogue.rng import RandomSource
 
 def main() -> None:
     game = Game(rng=RandomSource(seed=42))
-    print("=== 初始地图 ===")
+    print("=== 初始地图（蜘蛛侠 MCU 荷兰弟版）===")
     print(game.render())
-    print("\n=== 尝试 右 / 下 / 下(撞墙) ===")
-    for label, (dx, dy) in [("右", (1, 0)), ("下", (0, 1)), ("下", (0, 1))]:
-        ok = game.move(dx, dy)
-        print(f"{label}: {'成功' if ok else '被挡'}")
-    print("\n=== 移动后 ===")
+    print(f"玩家 HP: {game.player_hp}/{game.player_max_hp}")
+
+    # M2：在玩家右侧生成一只街头恶徒，演示「蛛网拳」战斗
+    game.spawn_monster("街头暴徒", 2, 1, hp=12, attack=3)
+    print("\n=== 出现怪物，演示蛛网拳战斗 ===")
     print(game.render())
+    target = game.monsters[0]
+    round_n = 1
+    while target.alive and not game.player_dead:
+        dmg, dead = game.player_attack(target)
+        tail = "（已击倒！）" if dead else f"，被反击 玩家 HP={game.player_hp}"
+        print(f"第{round_n}回合: 蛛网拳造成 {dmg} 伤害，怪物 HP={target.hp}{tail}")
+        round_n += 1
+
+    print("\n=== 战后地图 ===")
+    print(game.render())
+    print(f"玩家 HP: {game.player_hp}/{game.player_max_hp}")
 
 
 if __name__ == "__main__":
