@@ -1,4 +1,6 @@
-"""M1~M9：格子地图 + 玩家移动 + 战斗系统 + 怪物 AI + 道具背包 + 程序化关卡 + 视野渲染 + 怪物感知潜行 + 噪音听觉 + 主动制造响动（蜘蛛侠 MCU 荷兰弟版主题）。
+"""M1~M13：格子地图 + 玩家移动 + 战斗系统 + 怪物 AI + 道具背包 + 程序化关卡 + 视野渲染
++ 怪物感知潜行 + 噪音听觉 + 主动制造响动 + ANSI 颜色 + 光照衰减 + 随身手电 + 光照影响玩家视野
+（蜘蛛侠 MCU 荷兰弟版主题）。
 
 注意（不变量 #1）：随机经 RandomSource 注入；本模块不直接引入随机模块。
 注意（GB-1 边界地雷）：不可走出边界、不可走入墙、不可走入怪物。
@@ -22,6 +24,11 @@
                   默认关闭（flashlight=False ⇒ 即使 light=True 也与 M11 逐字节一致）；
                   开启时只在玩家处追加一个半径 FLASHLIGHT_RADIUS 的光源，同样只缩短怪物感知
                   （半径恒 ≤ MONSTER_SIGHT_RADIUS），对称硬性质不破；toggle 不改写任何玩法状态。
+注意（不变量 #14）：M13 光照影响玩家自身视野——光照开启且视野开启时，玩家视野半径随**目标格**
+                  光照衰减（暗 2 / 昏暗 4 / 明 8），与 M11「暗处缩短怪物感知」对称；
+                  按目标格光照算（亮处的东西容易被看见、暗处的东西难被看见），有效半径恒 ≤ SIGHT_RADIUS(8)，
+                  同档位下 player_r ≥ monster_r（2≥2 / 4≥4 / 8≥7）⇒ #9 硬性质「怪看得见你 ⇒ 你看得见它」不破；
+                  纯几何零随机、默认关闭（light=False 或 fov=False ⇒ 走 M6 原逻辑，与 M1~M12 逐字节一致）。
 """
 from __future__ import annotations
 from typing import NamedTuple
@@ -943,13 +950,24 @@ class Game:
         """重算可见格，并把它们并入「已探索记忆」（记忆只增不减）。
 
         幂等：同样的状态算几次结果都一样（#2/#8）。
-        M11：光照开启时顺手重算光照场（同一份 grid + 光源 ⇒ 同一份场，#1/#2）。
+        M11/M13：光照开启时先重算光照场（同一份 grid + 光源 ⇒ 同一份场，#1/#2），
+                 再用它算可见格——M13 让玩家视野半径也随光照衰减（暗处看不远）。
+        M13 只在「光照且视野都开启」时生效：light_field 传入 visible_tiles，
+        逐格按目标格光照决定视野半径（亮处易见、暗处难见）⇒ #9 硬性质不破（见 fov.visible_tiles）。
+        光照关闭或视野关闭 ⇒ 走 M6 原逻辑（固定半径），与 M1~M12 逐字节一致。
         """
-        self.visible = visible_tiles(self.grid, (self.px, self.py),
-                                     SIGHT_RADIUS, self.rooms)
-        self.explored |= self.visible
         if self.light_enabled:
-            self.update_light()
+            self.update_light()  # 先算光照场（M13 依赖它算玩家视野半径）
+        if self.light_enabled and self.fov_enabled:
+            # M13：光照影响玩家视野——传 light_field（含微光+手电+房间灯的完整光照场）
+            self.visible = visible_tiles(self.grid, (self.px, self.py),
+                                         SIGHT_RADIUS, self.rooms,
+                                         light_field=self.light_field)
+        else:
+            # M6 原逻辑：固定半径（光照关 / 视野关 ⇒ 与 M1~M12 逐字节一致）
+            self.visible = visible_tiles(self.grid, (self.px, self.py),
+                                         SIGHT_RADIUS, self.rooms)
+        self.explored |= self.visible
         return self.visible
 
     # ---------- M11 光照衰减（明暗梯度 + 暗处缩短怪物感知半径）----------
