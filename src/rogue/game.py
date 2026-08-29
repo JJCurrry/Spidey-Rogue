@@ -1,21 +1,19 @@
-"""M1~M4：格子地图 + 玩家移动 + 战斗系统 + 怪物 AI + 道具背包（蜘蛛侠 MCU 荷兰弟版主题）。
+"""M1~M5：格子地图 + 玩家移动 + 战斗系统 + 怪物 AI + 道具背包 + 程序化关卡（蜘蛛侠 MCU 荷兰弟版主题）。
 
 注意（不变量 #1）：随机经 RandomSource 注入；本模块不直接引入随机模块。
 注意（GB-1 边界地雷）：不可走出边界、不可走入墙、不可走入怪物。
 注意（不变量 #3）：玩家/怪物 HP 永不为负，由 take_damage 的 max(0, ...) 保证。
 注意（不变量 #5）：背包容量有上限，满包时拾取失败且道具留在地面。
 注意（不变量 #6）：治疗类效果不得让 HP 超过上限，由 _heal_player 的 min(...) 钳制。
+注意（不变量 #7）：程序化楼层中玩家起点可达全部可通行格（生成期保证 + 洪泛兜底）。
 """
 from __future__ import annotations
+from typing import NamedTuple
 from .rng import RandomSource
+from .tiles import WALL, FLOOR, PLAYER, MONSTER, ITEM, STAIRS
+from .level import Level, Room, generate_level, TUTORIAL_LEVEL_NAME
 
-WALL = "#"
-FLOOR = "."
-PLAYER = "@"
-MONSTER = "M"
-ITEM = "!"
-
-# M1 采用固定小房间（程序化生成留待后续里程碑）
+# M1 采用固定小房间（程序化生成见 M5 的 level.py；默认仍是这张教学图）
 _MAP = [
     "#######",
     "#@....#",
@@ -47,6 +45,35 @@ ITEM_NAMES = {
     "nano_boost": "斯塔克纳米强化剂",
 }
 ITEM_KEYS = ("sandwich", "web_cartridge", "nano_boost")
+
+# M5 程序化关卡的「撒点」数值（地形生成参数见 level.py）
+MONSTER_ROOM_PROB = 0.55       # 房间里有怪的概率（起始房间除外）
+MONSTERS_PER_ROOM_MAX = 2      # 有怪的房间里刷几只（1~该值，经 rng 决定）
+ITEM_ROOM_PROB = 0.6           # 每间房放一件补给的概率（经 rng.chance，#1）
+MONSTER_HP_PER_DEPTH = 1       # 怪物 HP 随楼层号的成长量
+MONSTER_PLACE_TRIES = 8        # 单个实体在房间里找空位的尝试次数
+
+
+class MonsterKind(NamedTuple):
+    """怪物条目（M5 起按楼层解锁，不再手摆）。"""
+
+    name: str
+    hp: int
+    attack: int
+    behavior: str   # "chase" 贪心追击 / "wander" 随机游走（见 M3）
+    min_depth: int  # 从第几层开始出现
+
+
+# 怪物登记表（蜘蛛侠 MCU 荷兰弟版：街头恶徒 + 经典反派）
+# 攻击值刻意压低：M3 规则是「相邻即每回合挨打」，攻高会让换血变得无法承受
+MONSTER_TABLE = (
+    MonsterKind("街头小混混", 8, 1, "chase", 1),
+    MonsterKind("迷途无人机", 5, 1, "wander", 1),
+    MonsterKind("神秘客幻象", 7, 2, "wander", 3),
+    MonsterKind("奥斯本实验体", 12, 2, "chase", 3),
+    MonsterKind("电光人残党", 9, 3, "wander", 5),
+    MonsterKind("沙人分身", 14, 2, "chase", 5),
+)
 
 
 class Item:
@@ -94,19 +121,32 @@ class Monster:
 
 
 class Game:
-    def __init__(self, rng: RandomSource | None = None) -> None:
+    def __init__(self, rng: RandomSource | None = None, level: Level | None = None,
+                 populate: bool = True) -> None:
+        """rng 为注入的随机源；level 为 None 时用 M1 的固定教学图，否则装载程序化楼层。
+
+        populate 控制装载时是否自动撒怪与补给（测试生成期结构时可关掉）。
+        """
         self.rng = rng or RandomSource(0)
-        self.grid = [list(row) for row in _MAP]
-        self.height = len(self.grid)
-        self.width = len(self.grid[0])
-        self.px, self.py = self._find_player()
-        # M2 玩家状态（蜘蛛侠：年轻但能扛，HP 由引擎钳制 ≥0）
+        # M2 玩家状态（跨层保留：HP / 背包 / 纳米加成）
         self.player_max_hp = PLAYER_MAX_HP
         self.player_hp = PLAYER_MAX_HP
         self.player_dmg_bonus = 0       # M4：纳米强化剂提供的永久伤害加成
         self.monsters: list[Monster] = []
         self.items: list[Item] = []     # M4：地面道具
         self.inventory: list[Item] = []  # M4：背包（容量上限见 INVENTORY_CAPACITY，#5）
+        # M5 楼层元信息（教学图先给默认值，程序化楼层由 load_level 覆盖）
+        self.depth = 1
+        self.level_name = TUTORIAL_LEVEL_NAME
+        self.rooms: list[Room] = []
+        self.stairs: tuple[int, int] | None = None
+        if level is None:
+            self.grid = [list(row) for row in _MAP]
+            self.height = len(self.grid)
+            self.width = len(self.grid[0])
+            self.px, self.py = self._find_player()
+        else:
+            self.load_level(level, populate=populate)
 
     def _find_player(self):
         for y, row in enumerate(self.grid):
@@ -143,7 +183,7 @@ class Game:
     # ---------- M2 怪物 / 战斗 ----------
     def spawn_monster(self, name: str, x: int, y: int, hp: int, attack: int = 3,
                        behavior: str = "chase") -> Monster:
-        """在 (x,y) 生成一只怪物（M3 之前由外部手动布置，演示/测试用）。
+        """在 (x,y) 生成一只怪物（M5 起由 _populate_level 代为撒点，手摆仅用于演示/测试）。
 
         behavior: "chase" 贪心追击 / "wander" 随机游走（随机仅经 RandomSource，#1）。
         """
@@ -356,9 +396,96 @@ class Game:
     def player_dead(self) -> bool:
         return self.player_hp <= 0
 
+    # ---------- M5 程序化关卡 ----------
+    # 不变量 #1：撒点用的随机全部经 self.rng（RandomSource），本模块不直接引入随机模块。
+    # 不变量 #2：先生成地形、再按固定房间顺序撒点 ⇒ 同 seed + 同 depth ⇒ 同楼层。
+    # 不变量 #7：楼层由 level.generate_level 保证连通，玩家起点可达全部可通行格。
+    @classmethod
+    def procedural(cls, rng: RandomSource, depth: int = 1) -> "Game":
+        """开一局程序化楼层：生成与撒点共用同一个 rng，先后固定（#1/#2）。"""
+        return cls(rng=rng, level=generate_level(rng, depth=depth))
+
+    def load_level(self, level: Level, populate: bool = True) -> None:
+        """装载一层程序化楼层：重置地形与实体，**保留**玩家 HP / 背包 / 伤害加成。"""
+        self.grid = [list(row) for row in level.grid]
+        self.height = level.height
+        self.width = level.width
+        self.depth = level.depth
+        self.level_name = level.name
+        self.rooms = list(level.rooms)
+        self.stairs = level.stairs
+        self.px, self.py = level.start
+        self.grid[self.py][self.px] = PLAYER
+        self.monsters = []
+        self.items = []
+        if populate:
+            self._populate_level()
+
+    def _populate_level(self) -> None:
+        """按房间撒怪与补给：起始房间不刷怪，留一间房喘息。
+
+        有怪的房间（概率 MONSTER_ROOM_PROB）再刷 1~MONSTERS_PER_ROOM_MAX 只，
+        于是有的房间空着、有的埋伏两只——楼层整体密度约每两间房一只。
+        """
+        spawnable = [r for r in self.rooms if not r.contains(self.px, self.py)]
+        for room in spawnable:
+            if self.rng.chance(MONSTER_ROOM_PROB):
+                for _ in range(self.rng.int(1, MONSTERS_PER_ROOM_MAX)):
+                    spot = self._free_tile_in(room)
+                    if spot is None:
+                        break
+                    self._spawn_random_monster(self.depth, *spot)
+        if not self.monsters and spawnable:
+            # 保底：整层至少一只怪，免得生成出「一只怪都没有」的空楼层
+            spot = self._free_tile_in(spawnable[-1])
+            if spot is not None:
+                self._spawn_random_monster(self.depth, *spot)
+        for room in self.rooms:
+            if self.rng.chance(ITEM_ROOM_PROB):
+                spot = self._free_tile_in(room)
+                if spot is not None:
+                    self.spawn_item(self.rng.choice(ITEM_KEYS), *spot)
+
+    def _free_tile_in(self, room: Room,
+                      tries: int = MONSTER_PLACE_TRIES) -> tuple[int, int] | None:
+        """房间内找一格「可通行且空着」的位置；找不到返回 None（不变量 #4）。"""
+        for _ in range(tries):
+            x, y = room.random_tile(self.rng)
+            if not self.in_bounds(x, y) or self.is_wall(x, y):
+                continue
+            if (x, y) == (self.px, self.py) or (x, y) == self.stairs:
+                continue
+            if self.monster_at(x, y) or self.item_at(x, y):
+                continue
+            return (x, y)
+        return None
+
+    def _spawn_random_monster(self, depth: int, x: int, y: int) -> Monster:
+        """从已解锁的怪物条目中随机挑一种（#1），HP 随楼层号成长。"""
+        unlocked = [k for k in MONSTER_TABLE if k.min_depth <= depth] or list(MONSTER_TABLE)
+        kind = self.rng.choice(unlocked)
+        hp = kind.hp + (depth - 1) * MONSTER_HP_PER_DEPTH
+        return self.spawn_monster(kind.name, x, y, hp, kind.attack, kind.behavior)
+
+    def can_descend(self) -> bool:
+        """是否站在下行楼梯上（固定教学图没有楼梯 ⇒ 恒为 False）。"""
+        return self.stairs is not None and (self.px, self.py) == self.stairs
+
+    def descend(self) -> bool:
+        """下潜到下一层：重生成楼层、重置实体，保留 HP / 背包 / 伤害加成。"""
+        if not self.can_descend():
+            return False
+        self.load_level(generate_level(self.rng, depth=self.depth + 1))
+        return True
+
     # ---------- 渲染 ----------
     def render(self) -> str:
         view = [list(row) for row in self.grid]
+        # M5：楼梯画在空地板上（优先级最低，道具/怪物/玩家依次覆盖）
+        if self.stairs is not None and self.in_bounds(*self.stairs):
+            sx, sy = self.stairs
+            if view[sy][sx] == FLOOR:
+                view[sy][sx] = STAIRS
         # M4：地面道具画在空地板上；玩家/怪物优先显示
         for it in self.items:
             if self.in_bounds(it.x, it.y) and view[it.y][it.x] == FLOOR:

@@ -30,7 +30,7 @@
 # 0) 装好 Python 3.11+（游戏运行需要；门禁也需要）
 python --version
 
-# 1) 玩一下（ASCII 渲染 + 示例移动）
+# 1) 玩一下（ASCII 渲染 + 程序化三层下潜演示）
 python main.py
 
 # 2) 跑 L1 墙四道门（每次改动前必跑）
@@ -40,7 +40,9 @@ python scripts/gate.py
 python scripts/review_pipeline.py
 ```
 
-预期：`main.py` 打印初始地图与一次移动后的地图；`gate.py` 四道门 ALL GREEN（7 测试全绿）；`review_pipeline.py` 无 HIGH。
+预期：`main.py` 打印按 Seed 生成的三层纽约楼层（房间+走廊、自动撒怪撒道具），
+蜘蛛侠逐层清怪、走到楼梯下潜，HP 与背包跨层保留；
+`gate.py` 四道门 ALL GREEN（79 测试全绿）；`review_pipeline.py` 无 HIGH。
 
 ---
 
@@ -52,8 +54,8 @@ python scripts/review_pipeline.py
 > **禁止裸调 `random`/`secrets`/`os.urandom`**——随机必须走 `src/rogue/rng.py` 的 `RandomSource`（Seed 注入）。
 > 一个里程碑 = 一次提交；提交前更新接力文件（含本次 commit）。
 
-新会话读完 `CLAUDE.md + 工单 T-001 + 接力 HANDOFF-T001`，就知道：
-M1（格子+移动）已经做完（commit `fdfaa307`），下一步该做 **M2 战斗系统**。
+新会话读完 `CLAUDE.md + 最新工单 + 接力 HANDOFF-T001`，就知道：
+M1~M5 已经做完（M5 = 程序化关卡），下一步该做 **M6 视野 / 渲染层**。
 
 ---
 
@@ -62,11 +64,11 @@ M1（格子+移动）已经做完（commit `fdfaa307`），下一步该做 **M2 
 | 里程碑 | 内容 | 触碰的红线 / 纪律 |
 |---|---|---|
 | M1 ✅ | 格子地图 + 玩家移动 | Seed 注入（暂不触发，地图固定） |
-| M2 | 战斗系统（玩家/怪物 HP、攻击结算） | #3 HP≥0、#2 回合确定性（用 Seed） |
-| M3 | 怪物 AI（简单追击/随机游走） | #1 随机走 `RandomSource` |
-| M4 | 道具 / 背包 | 背包容量上限（待生效红线） |
-| M5 | 程序化关卡生成 | #1 生成随机走 Seed、#2 确定性 |
-| M6 | 视野 / 渲染层 | —— |
+| M2 ✅ | 战斗系统（玩家/怪物 HP、攻击结算） | #3 HP≥0、#2 回合确定性（用 Seed） |
+| M3 ✅ | 怪物 AI（简单追击/随机游走） | #1 随机走 `RandomSource` |
+| M4 ✅ | 道具 / 背包 | #5 背包容量上限、#6 HP 不超上限 |
+| M5 ✅ | 程序化关卡生成（房间+走廊、撒怪撒道具、下潜） | #1 生成随机走 Seed、#2 确定性、**#7 地图连通性** |
+| M6 | 视野 / 渲染层（迷雾 + 光照） | —— |
 
 每完成一个里程碑：跑 `gate` 全绿 → 更新 `docs/接力/*.md`（含本次 commit）→ 提交。
 
@@ -97,18 +99,25 @@ roguelike-ai-coding/
 │   ├── review_pipeline.py        评审流水线 5 监理
 │   ├── hooks/pre-commit          提交瞬间调用 gate.py
 │   ├── gate.{sh,ps1}             本地/CI 共用入口
-│   └── .ratchet                  覆盖率棘轮基线（=7）
+│   └── .ratchet                  覆盖率棘轮基线（=79）
 ├── src/rogue/
-│   ├── __init__.py               暴露 Game / RandomSource
+│   ├── __init__.py               暴露 Game / Monster / Item / Level / RandomSource
 │   ├── rng.py                    ★ 唯一 random 入口（RandomSource，Seed 注入）
-│   ├── game.py                   M1：格子地图 + 玩家移动（不含随机）
+│   ├── tiles.py                  M5：格子字符常量（#/./@/M/!/>）
+│   ├── level.py                  M5：Room / Level / generate_level（房间+走廊 + 连通性兜底）
+│   ├── game.py                   M1~M5：移动/战斗/AI/道具/装载楼层/下潜（不含随机）
 │   └── __main__.py               python -m rogue
-├── tests/test_game.py            unittest 零依赖（7 例行为规格）
+├── tests/                        unittest 零依赖（共 79 例行为规格）
+│   ├── test_game.py              M1（7 例，跑在固定教学图上）
+│   ├── test_combat.py            M2（10 例）
+│   ├── test_ai.py                M3（11 例）
+│   ├── test_items.py             M4（23 例）
+│   └── test_level.py             M5（28 例，含不变量 #7 的 30 seed 连通性判定）
 └── docs/                         七件套
-    ├── 不变量.md                ⑤ 红线（#1 Seed 注入）
+    ├── 不变量.md                ⑤ 红线（#1 Seed 注入 … #7 地图连通性）
     ├── 术语表.md                ⑥ 只收望文生义会错的词
     ├── 地图.md                  ⑦ 架构地图
     ├── adr/ADR-001-技术选型.md  ④ 决策记录
-    ├── 工单/T-001*.md           ② 一入一出 + 委托级别 + 验收分级
+    ├── 工单/T-001*.md           ② 一入一出 + 委托级别 + 验收分级（至 T-005）
     └── 接力/HANDOFF-T001.md     ③ 交接棒（含 commit + 下一步）
 ```
