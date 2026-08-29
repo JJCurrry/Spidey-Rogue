@@ -1,0 +1,4 @@
+# 本仓库的实际提交拦截由 scripts/hooks/pre-commit 提供
+# （已通过 `git config core.hooksPath scripts/hooks` 挂上）。
+# 此文件供团队若改用 pre-commit 框架时参考，不影响现有墙。
+repos: []

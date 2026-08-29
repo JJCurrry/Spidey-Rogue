@@ -1,0 +1,9 @@
+#!/bin/sh
+# L1 墙：提交瞬间拦截。失败则提交被拒。
+ROOT="$(git rev-parse --show-toplevel)"
+PY="$(command -v python3 || command -v python)"
+if [ -z "$PY" ]; then
+  echo "未找到 python，无法跑 L1 墙"
+  exit 1
+fi
+exec "$PY" "$ROOT/scripts/gate.py"

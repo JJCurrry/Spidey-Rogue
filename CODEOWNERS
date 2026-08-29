@@ -1,0 +1,7 @@
+# 合并门 · 必需评审 / 仲裁序
+# 所有变更至少需要下列 Owner 之一评审通过
+*           @JJCurrry
+src/        @JJCurrry
+docs/        @JJCurrry
+scripts/     @JJCurrry
+.github/     @JJCurrry
