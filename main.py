@@ -1,9 +1,10 @@
 """终端 Roguelike 演示入口（M1 移动 + M2 战斗 + M3 怪物 AI + M4 道具背包 + M5 程序化关卡
-+ M6 视野 + M7 怪物感知与潜行 + M8 噪音与听觉 + M9 主动制造响动）。
++ M6 视野 + M7 怪物感知与潜行 + M8 噪音与听觉 + M9 主动制造响动 + M10 ANSI 颜色高亮）。
 
 主题：MCU 荷兰弟（Tom Holland）版蜘蛛侠。
 运行：python main.py（--no-fog 切回全图；--stealth 开启怪物视野与潜行；--noise 再开启听觉，
-      --noise 隐含 --stealth——听觉只在「怪物需要被发现才追你」时才有意义）
+      --noise 隐含 --stealth——听觉只在「怪物需要被发现才追你」时才有意义；
+      --color / --no-color 控制终端上色，默认在终端（TTY）自动上色、管道/重定向下自动降级为纯文本）
 
 演示流程：按 seed 程序化生成楼层 → 蜘蛛侠逐层清怪 → 走楼梯下潜（共 MAX_DEPTH 层）。
 随机只从 src/rogue/rng.py 流出（不变量 #1）；本文件不含任何随机调用。
@@ -38,6 +39,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 from rogue import Game
 from rogue.game import DECOY_KEY, NOISE_DECOY
 from rogue.rng import RandomSource
+from rogue.color import colorize, should_color  # M10：纯展示层上色
 
 SEED = 19                # 演示种子（挑过：三层都有怪，且能在回合上限内清场）
 MAX_DEPTH = 3            # 演示下潜到第几层收工
@@ -314,6 +316,13 @@ def main() -> None:
     noise = "--noise" in args              # M8：听觉默认关闭
     # 听觉只在「怪物要被发现才追你」时才有意义 ⇒ --noise 隐含 --stealth
     stealth = "--stealth" in args or noise
+    # M10：终端上色（纯展示层，不改字形/状态）。默认 TTY 自动开，可用 --no-color / --color 强制。
+    if "--no-color" in args:
+        color_on = False
+    elif "--color" in args:
+        color_on = True
+    else:
+        color_on = should_color()
     rng = RandomSource(seed=SEED)
     game = Game.procedural(rng, depth=1, fov=fog, stealth=stealth, noise=noise)
     print(f"=== 第 {game.depth} 层「{game.level_name}」（seed={SEED}）===")
@@ -324,7 +333,7 @@ def main() -> None:
     if noise:
         print("听觉模式：走路无声，但动作会响——蛛网拳（6）、被蛛网弹缠住的怪挣扎（7，"
               "声源在它自己那儿）、下潜落地（8）；倒挂突袭只有 2，几乎无声。听见动静的敌人画 ~。")
-    print(game.render())
+    print(colorize(game.render(), color_on))
     print(f"玩家 HP: {game.player_hp}/{game.player_max_hp} | 背包: {_bag_str(game)}")
 
     shown_depth = game.depth
@@ -353,9 +362,9 @@ def main() -> None:
             shown_depth = game.depth
             level_turn = 0
             print(f"\n=== 下潜到第 {game.depth} 层「{game.level_name}」===")
-            print(game.render())
+            print(colorize(game.render(), color_on))
         elif level_turn % MAP_EVERY == 0:
-            print(game.render())
+            print(colorize(game.render(), color_on))
 
         if game.player_dead:
             print("\n蜘蛛侠被击倒了……（演示结束）")
