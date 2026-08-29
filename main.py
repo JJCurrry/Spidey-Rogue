@@ -1,5 +1,5 @@
 """终端 Roguelike 演示入口（M1 移动 + M2 战斗 + M3 怪物 AI + M4 道具背包 + M5 程序化关卡
-+ M6 视野 + M7 怪物感知与潜行 + M8 噪音与听觉）。
++ M6 视野 + M7 怪物感知与潜行 + M8 噪音与听觉 + M9 主动制造响动）。
 
 主题：MCU 荷兰弟（Tom Holland）版蜘蛛侠。
 运行：python main.py（--no-fog 切回全图；--stealth 开启怪物视野与潜行；--noise 再开启听觉，
@@ -22,6 +22,11 @@ M8：`--noise` 开启噪音与听觉——动静沿走廊传播、穿墙会闷�
 蛛网拳（响 6）、倒挂突袭（响 2，几乎无声）、被蛛网弹缠住的怪挣扎（响 7，声源在它自己那儿
 ⇒ 同伴被引向它）、下潜落地（响 8）。听见动静但还没看见你的敌人画成 `~`。
 默认关闭 ⇒ 不加参数时演示与 M7 完全一致。
+
+M9：`--noise` 下蜘蛛侠脚边会多一个**皇后区垃圾桶盖**——抄起来甩到远处，落地「哐」的一声
+（响 9，全场最响），把听得见的敌人全引到**落点**去。这是 M8「调虎离山」的主动版：
+被动版只能靠「蛛网弹缠住一只怪、它挣扎着把同伴引过去」，而那已经先动手了。
+默认（不加 --noise）既不会刷出垃圾盖、也甩不响 ⇒ 与 M8 逐字节一致。
 """
 from __future__ import annotations
 import os
@@ -31,6 +36,7 @@ from collections import deque
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 
 from rogue import Game
+from rogue.game import DECOY_KEY, NOISE_DECOY
 from rogue.rng import RandomSource
 
 SEED = 19                # 演示种子（挑过：三层都有怪，且能在回合上限内清场）
@@ -179,6 +185,29 @@ def _find_in_bag(game: Game, key: str) -> int:
 WEB_SHOT_RANGE = 6       # 蛛网弹的有效射程（曼哈顿距离）
 HEAL_THRESHOLD = 0.45    # HP 低于该比例就吃三明治
 LOOT_RANGE = 6           # 清场后只「顺路」捡这个距离内的补给，太远的直接奔楼梯
+DECOY_MIN_THREAT = 2     # 至少被几只敌人盯上，才值得花一回合甩垃圾桶盖（换取各个击破）
+
+
+def _decoy_spot(game: Game):
+    """挑一个甩垃圾桶盖的落点：**听得见的人最多**、其次**离你最远**。
+
+    前者保证这一盖不白甩，后者保证敌人是朝「离开你」的方向走——调虎离山要的是
+    把它们从你身边支开，而不是换个地方团团围住你。
+    遍历顺序固定、用严格大于取最优 ⇒ 确定性（不引入任何随机）。
+    没有人听得见时返回 None（甩了也是白甩）。
+    """
+    best = None
+    best_score = (0, -1)      # (听得见的敌人数, 与玩家的切比雪夫距离)
+    for y in range(game.height):
+        for x in range(game.width):
+            if not game.can_throw(x, y):
+                continue
+            heard = len(game.monsters_hearing(x, y, NOISE_DECOY))
+            score = (heard, max(abs(x - game.px), abs(y - game.py)))
+            if score > best_score:
+                best_score = score
+                best = (x, y)
+    return best if best_score[0] >= 1 else None
 
 
 def _player_act(game: Game) -> str:
@@ -208,7 +237,18 @@ def _player_act(game: Game) -> str:
         if step and game.move(*step):
             return "被围住了，后撤拉开距离"
 
-    # 5) 有敌人：相邻就打（M2）——优先补刀血量最低的那只，少挨一次反击；
+    # 5) 被多只敌人盯上、且还没人贴脸 ⇒ 甩出垃圾桶盖（M9：主动制造响动）。
+    #    把动静甩到「听得见的人最多、离你最远」的地方，换来各个击破的机会。
+    #    （有人贴脸就该打而不是甩——那一回合更值钱。）
+    if game.noise_enabled and not _adjacent_monsters(game):
+        if len(game.alerted_monsters()) >= DECOY_MIN_THREAT:
+            idx = _find_in_bag(game, DECOY_KEY)
+            if idx >= 0:
+                spot = _decoy_spot(game)
+                if spot is not None and game.use_item(idx, target=spot):
+                    return f"抄起垃圾桶盖甩向 ({spot[0]},{spot[1]})，把动静引开！"
+
+    # 6) 有敌人：相邻就打（M2）——优先补刀血量最低的那只，少挨一次反击；
     #    不相邻就远程消耗或逼近（M4）；潜行开启时还能直接荡过去倒挂突袭（M7）
     if target is not None:
         adj = _adjacent_monsters(game)

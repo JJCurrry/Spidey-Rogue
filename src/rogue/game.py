@@ -1,4 +1,4 @@
-"""M1~M8：格子地图 + 玩家移动 + 战斗系统 + 怪物 AI + 道具背包 + 程序化关卡 + 视野渲染 + 怪物感知潜行 + 噪音听觉（蜘蛛侠 MCU 荷兰弟版主题）。
+"""M1~M9：格子地图 + 玩家移动 + 战斗系统 + 怪物 AI + 道具背包 + 程序化关卡 + 视野渲染 + 怪物感知潜行 + 噪音听觉 + 主动制造响动（蜘蛛侠 MCU 荷兰弟版主题）。
 
 注意（不变量 #1）：随机经 RandomSource 注入；本模块不直接引入随机模块。
 注意（GB-1 边界地雷）：不可走出边界、不可走入墙、不可走入怪物。
@@ -12,6 +12,8 @@
                   （stealth=False ⇒ 怪物恒为「已察觉」，M1~M6 的行为一字节不变）。
 注意（不变量 #10）：声音传播是纯几何、不消耗 RandomSource；听觉默认关闭
                   （noise=False ⇒ 只有视觉，M1~M7 的行为一字节不变）。
+注意（不变量 #11）：投掷几何是纯几何、不消耗 RandomSource；诱饵只在听觉开启时出现
+                  （noise=False ⇒ 既不刷「皇后区垃圾桶盖」、也甩不响，M1~M8 一字节不变）。
 """
 from __future__ import annotations
 from typing import NamedTuple
@@ -20,7 +22,8 @@ from .tiles import (WALL, FLOOR, PLAYER, MONSTER, ITEM, STAIRS, UNSEEN, SENSE,
                     UNAWARE, HEARD)
 from .level import Level, Room, generate_level, TUTORIAL_LEVEL_NAME
 from .fov import (SIGHT_RADIUS, SPIDER_SENSE_RADIUS, MONSTER_SIGHT_RADIUS,
-                  visible_tiles, in_spider_sense, monster_can_see)
+                  visible_tiles, in_spider_sense, monster_can_see,
+                  has_line_of_sight)
 from .sound import (NOISE_COST_FLOOR, NOISE_COST_WALL, noise_field,
                     noise_reaches)
 
@@ -56,6 +59,12 @@ NOISE_LANDING = 8              # 进入新楼层的落地声（刚落地就惊�
 CAUSE_SIGHT = "sight"          # 被惊动的原因：看见你了
 CAUSE_SOUND = "sound"          # 被惊动的原因：听见动静了（渲染为 `~`）
 
+# M9 主动制造响动（两条常量都是确定性常数，不掷骰 ⇒ 不扰动随机序列，#2/#11）
+# 主题：friendly neighborhood Spider-Man —— 脚边有什么抄什么，皇后区最不缺的就是垃圾盖。
+NOISE_DECOY = 9                # 垃圾桶盖落地的响动（全场最响：它的全部意义就是响）
+DECOY_RANGE = 6                # 甩出距离上限（切比雪夫）⇒ 隔着房间甩不过去，得走到看得见的地方
+DECOY_KEY = "decoy"            # 诱饵道具的 key（**不在** ITEM_KEYS 掉落池里，理由见下）
+
 # M4 道具与背包（蜘蛛侠主题：梅姨的爱心便当、备用蛛网芯、斯塔克的纳米科技）
 INVENTORY_CAPACITY = 5         # 不变量 #5：背包容量上限
 DROP_PROB = 0.5                # 怪物死亡掉落概率（经 RandomSource，#1）
@@ -69,7 +78,11 @@ ITEM_NAMES = {
     "sandwich": "梅姨的三明治",
     "web_cartridge": "蛛网发射器备用芯",
     "nano_boost": "斯塔克纳米强化剂",
+    DECOY_KEY: "皇后区垃圾桶盖",  # M9 诱饵（**不进掉落池** ⇒ 不扰动随机序列）
 }
+# 掉落表刻意**不含** decoy：rng.choice 的取值域从 3 变 4 会改变 _randbelow 的拒绝采样，
+# 进而改变随机数消耗 ⇒ 既有三条演示的回放全部作废（不变量 #2）。
+# 诱饵改由「听觉开启 ⇒ 开局脚边躺着一个」供给，零随机扰动（见 Game._grant_decoy）。
 ITEM_KEYS = ("sandwich", "web_cartridge", "nano_boost")
 
 # M5 程序化关卡的「撒点」数值（地形生成参数见 level.py）
@@ -218,6 +231,7 @@ class Game:
             self.width = len(self.grid[0])
             self.px, self.py = self._find_player()
             self.update_fov()
+            self._grant_decoy()   # M9：听觉开启时脚边躺着一个垃圾桶盖
         else:
             self.load_level(level, populate=populate)
 
@@ -620,6 +634,57 @@ class Game:
             return False
         return noise_reaches(self.grid, (x, y), (monster.x, monster.y), loudness)
 
+    # ---------- M9 主动制造响动（皇后区垃圾桶盖）----------
+    # 不变量 #11：投掷是纯几何（`fov.has_line_of_sight` + 射程 + 落点可通行），
+    #             不消耗 RandomSource ⇒ 不扰动战斗/掉落/生成的随机序列；
+    #             响动仍只经 `emit_noise` → `Monster.alert(cause=CAUSE_SOUND)` 唯一入口生效。
+    # 设计要点（ADR-005）：M8 的「调虎离山」是**被动**的——唯一的非玩家声源是「被蛛网弹
+    #             缠住的怪在挣扎」，想引开巡逻就先得动手，而动手（响 6）已经先招来半个视野。
+    #             垃圾盖让动静第一次成为玩家的**主动选择**：声源由你指定，不是由战斗位置决定。
+    def can_throw(self, x: int, y: int) -> bool:
+        """垃圾盖能否甩到 (x,y)（纯几何、零随机，不变量 #11）。
+
+        三条硬约束，任一不满足即甩不出去：
+          1) 在界内且**不是墙**——盖子得落地才响（与 `spawn_item` 对墙格返回 None 同款边界观，#4）；
+          2) 切比雪夫距离在 `1..DECOY_RANGE`——「甩出去」本身就意味着离开自己，
+             甩在脚下等于把敌人引到自己身上，那是 bug 不是战术；
+          3) 玩家**看得见落点**（复用 M6 的 `has_line_of_sight`）——甩没看见的地方不算瞄准。
+        """
+        if not self.in_bounds(x, y) or self.is_wall(x, y):
+            return False
+        if not 1 <= max(abs(x - self.px), abs(y - self.py)) <= DECOY_RANGE:
+            return False
+        return has_line_of_sight(self.grid, (self.px, self.py), (x, y))
+
+    def throw_decoy(self, x: int, y: int) -> list[Monster] | None:
+        """把垃圾桶盖甩到 (x,y)：落地发出 `NOISE_DECOY` 的响动，惊动听得见的敌人。
+
+        被惊动者扑向**落点**（`last_seen = (x,y)`），不是玩家的位置 ⇒ 调虎离山成立。
+        返回本次被惊动的敌人；落点非法 / 听觉关闭 ⇒ **None（不消耗道具）**——
+        与「满血不吃三明治」「场上无怪不射蛛网弹」同一条不浪费规则（#11）。
+        """
+        if not self.noise_enabled:
+            return None          # 听觉关掉的世界里没人听得见，甩出去也是白甩
+        if not self.can_throw(x, y):
+            return None
+        return self.emit_noise(x, y, NOISE_DECOY)
+
+    def _grant_decoy(self) -> Item | None:
+        """听觉开启时，开局脚边躺着一个「皇后区垃圾桶盖」（零随机、不扰动生成序列）。
+
+        为什么**不**靠掉落或在房间里撒点：
+          - 进 `ITEM_KEYS` 掉落池会把 `rng.choice` 的取值域从 3 改成 4，
+            `_randbelow` 的拒绝采样随之改变随机数消耗 ⇒ 既有三条演示的回放全部作废（#2）；
+          - 用 rng 在起始房撒点同样会消耗随机数（哪怕只在听觉模式）⇒ 听觉模式的
+            地形与撒点就不再与 M8 逐字节相同，回归证据链断掉。
+        直接放在起点则一个随机数都不碰：**听觉模式的楼层生成仍与 M8 完全一致**。
+
+        每层都给一个：主题自洽（纽约的楼里到处是垃圾），也保证这条机制用得上。
+        """
+        if not self.noise_enabled:
+            return None
+        return self.spawn_item(DECOY_KEY, self.px, self.py)
+
     # ---------- M4 道具与背包 ----------
     # 不变量 #1：掉落判定与掉落种类必须走 self.rng（RandomSource）；本模块不直接引入随机模块。
     # 不变量 #2：掉落只在「怪物阵亡」这一确定性事件上掷骰 ⇒ 同 seed + 同输入序列 ⇒ 同掉落。
@@ -627,13 +692,23 @@ class Game:
     # 不变量 #5：背包容量上限 INVENTORY_CAPACITY，满包拾取失败且道具留在地面。
     # 不变量 #6：治疗经 _heal_player 钳制，HP 不得超过上限。
     def spawn_item(self, key: str, x: int, y: int) -> Item | None:
-        """在 (x,y) 放置一个地面道具；非法格或该格已有道具则返回 None（不叠放）。"""
+        """在 (x,y) 放置一个地面道具；非法格或该格已有道具则返回 None（不叠放）。
+
+        唯一例外：目标是**玩家脚下那一格**且已有道具时，直接「换掉脚下物」——
+        M9 的诱饵常驻脚下，测试/玩法需要在脚下临时放别的东西时不应被挡住；
+        替换仍保持「一格一物」（不变量 #5），且实战中该分支不会被触发
+        （程序化撒点本来就避开起点，落地声也只发生在下潜时）。
+        """
         if key not in ITEM_NAMES:
             return None
         if not self.in_bounds(x, y) or self.is_wall(x, y):
             return None  # 不变量 #4
-        if self.item_at(x, y) is not None:
-            return None  # 一格只放一个道具，保持规则简单
+        existing = self.item_at(x, y)
+        if existing is not None:
+            if (x, y) == (self.px, self.py):
+                self.items.remove(existing)   # 换掉脚下物，不叠放
+            else:
+                return None                    # 其它格：一格只放一个道具
         item = Item(key, x, y)
         self.items.append(item)
         return item
@@ -659,8 +734,13 @@ class Game:
         self.inventory.append(item)
         return item
 
-    def use_item(self, index: int) -> bool:
-        """使用背包中第 index 个道具（0 起）；失败则不消耗。返回是否生效。"""
+    def use_item(self, index: int,
+                 target: tuple[int, int] | None = None) -> bool:
+        """使用背包中第 index 个道具（0 起）；失败则不消耗。返回是否生效。
+
+        target 只给 M9 的诱饵用：垃圾桶盖要甩到**指定落点**才响，
+        其余三件道具传不传都一样（向后兼容既有 215 例规格）。
+        """
         if not isinstance(index, int) or index < 0 or index >= len(self.inventory):
             return False
         item = self.inventory[index]
@@ -669,21 +749,33 @@ class Game:
                 return False  # 满血不浪费（不消耗）
             self._heal_player(SANDWICH_HEAL)
         elif item.key == "web_cartridge":
-            target = self._nearest_alive_monster()
-            if target is None:
+            victim = self._nearest_alive_monster()
+            if victim is None:
                 return False  # 场上无怪，留着下次用（不消耗）
-            self._damage_monster(target, WEB_SHOT_DMG)
-            if target.alive:
-                target.stunned = WEB_SHOT_STUN_TURNS
+            self._damage_monster(victim, WEB_SHOT_DMG)
+            if victim.alive:
+                victim.stunned = WEB_SHOT_STUN_TURNS
                 # M8：被缠住的怪会挣扎，动静从**它自己**那儿传出去 ⇒
                 # 同伴被引向它而不是玩家 —— 这就是「调虎离山」的成立条件。
-                self.emit_noise(target.x, target.y, NOISE_STRUGGLE)
+                self.emit_noise(victim.x, victim.y, NOISE_STRUGGLE)
         elif item.key == "nano_boost":
             self.player_dmg_bonus += NANO_BOOST_DMG
+        elif item.key == DECOY_KEY:
+            if self.throw_decoy(*self._as_tile(target)) is None:
+                return False  # 甩不出去（落点非法 / 听觉关闭）就不消耗
         else:
             return False
         self.inventory.pop(index)
         return True
+
+    @staticmethod
+    def _as_tile(target: tuple[int, int] | None) -> tuple[int, int]:
+        """把投掷落点参数规整成 (x, y)；传歪了就给一个必然非法的坐标（不抛异常）。"""
+        try:
+            x, y = target  # type: ignore[misc]
+            return (x, y)
+        except (TypeError, ValueError):
+            return (-1, -1)
 
     def _nearest_alive_monster(self) -> Monster | None:
         """曼哈顿距离最近的存活怪物；平局取生成顺序靠前者（确定性 #2）。"""
@@ -746,6 +838,7 @@ class Game:
         self.update_fov()  # M6：装载后立刻算一次可见区域
         if populate:
             self._populate_level()
+        self._grant_decoy()  # M9：新一层，又随手抄到一个垃圾桶盖（在撒点之后，不抢补给的位置）
 
     def _populate_level(self) -> None:
         """按房间撒怪与补给：起始房间不刷怪，留一间房喘息。
