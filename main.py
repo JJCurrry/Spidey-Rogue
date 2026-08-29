@@ -1,8 +1,9 @@
 """终端 Roguelike 演示入口（M1 移动 + M2 战斗 + M3 怪物 AI + M4 道具背包 + M5 程序化关卡
-+ M6 视野 + M7 怪物感知与潜行）。
++ M6 视野 + M7 怪物感知与潜行 + M8 噪音与听觉）。
 
 主题：MCU 荷兰弟（Tom Holland）版蜘蛛侠。
-运行：python main.py（--no-fog 切回全图；--stealth 开启怪物视野与潜行）
+运行：python main.py（--no-fog 切回全图；--stealth 开启怪物视野与潜行；--noise 再开启听觉，
+      --noise 隐含 --stealth——听觉只在「怪物需要被发现才追你」时才有意义）
 
 演示流程：按 seed 程序化生成楼层 → 蜘蛛侠逐层清怪 → 走楼梯下潜（共 MAX_DEPTH 层）。
 随机只从 src/rogue/rng.py 流出（不变量 #1）；本文件不含任何随机调用。
@@ -15,6 +16,12 @@ M6：默认开启视野/迷雾——蜘蛛侠只看得见视线内的区域，�
 M7：`--stealth` 开启怪物感知与潜行——敌人只在看得见你时才会被惊动，
 还没发现你的敌人画成小写 `m`；从它看不见的地方荡过去即可**倒挂突袭**
 （伤害翻倍、敌人来不及反击）。默认关闭 ⇒ 不加参数时演示与 M6 完全一致。
+
+M8：`--noise` 开启噪音与听觉——动静沿走廊传播、穿墙会闷掉一大截，
+听得见的敌人会扑向**声源**（不是你的实时位置）。走路无声，只有动作会响：
+蛛网拳（响 6）、倒挂突袭（响 2，几乎无声）、被蛛网弹缠住的怪挣扎（响 7，声源在它自己那儿
+⇒ 同伴被引向它）、下潜落地（响 8）。听见动静但还没看见你的敌人画成 `~`。
+默认关闭 ⇒ 不加参数时演示与 M7 完全一致。
 """
 from __future__ import annotations
 import os
@@ -33,6 +40,7 @@ MAP_EVERY = 15           # 每几回合补印一次地图，避免刷屏
 MOVE_LOG_EVERY = 4       # 纯走位每几步报一次，避免刷屏
 
 LEGEND = ("图例：@ 蜘蛛侠 | M 已察觉你的敌人 | m 未察觉的敌人（可倒挂突袭） | "
+          "~ 听见动静、还没看见你的敌人 | "
           "? 蜘蛛感应（看不见的威胁） | ! 补给 | > 下行楼梯 | # 墙 | . 地板 | 空白 未探索")
 
 DIRS = ((0, -1), (0, 1), (-1, 0), (1, 0))
@@ -151,6 +159,15 @@ def _stealth_str(game: Game) -> str:
     return f" | 已被 {len(game.alerted_monsters())} 只敌人发现（{unaware} 只尚未察觉）"
 
 
+def _noise_str(game: Game) -> str:
+    """状态栏的听觉提示（听觉关闭时不显示；没发出过动静也不显示）。"""
+    if not game.noise_enabled or game.last_noise_loudness <= 0:
+        return ""
+    heard = game.last_noise_heard
+    tail = "（没人听见）" if heard == 0 else f"（{heard} 只敌人正朝声源摸过来）"
+    return f" | 动静：响度 {game.last_noise_loudness}{tail}"
+
+
 def _find_in_bag(game: Game, key: str) -> int:
     """返回背包中该道具的下标；没有则返回 -1。"""
     for i, it in enumerate(game.inventory):
@@ -254,14 +271,19 @@ def _is_move(action: str) -> bool:
 def main() -> None:
     args = sys.argv[1:]
     fog = "--no-fog" not in args           # M6：默认开视野迷雾
-    stealth = "--stealth" in args          # M7：潜行默认关闭
+    noise = "--noise" in args              # M8：听觉默认关闭
+    # 听觉只在「怪物要被发现才追你」时才有意义 ⇒ --noise 隐含 --stealth
+    stealth = "--stealth" in args or noise
     rng = RandomSource(seed=SEED)
-    game = Game.procedural(rng, depth=1, fov=fog, stealth=stealth)
+    game = Game.procedural(rng, depth=1, fov=fog, stealth=stealth, noise=noise)
     print(f"=== 第 {game.depth} 层「{game.level_name}」（seed={SEED}）===")
     if fog:
         print(LEGEND)
     if stealth:
         print("潜行模式：还没发现你的敌人是小写 m —— 从它看不见的地方荡过去，一击放倒。")
+    if noise:
+        print("听觉模式：走路无声，但动作会响——蛛网拳（6）、被蛛网弹缠住的怪挣扎（7，"
+              "声源在它自己那儿）、下潜落地（8）；倒挂突袭只有 2，几乎无声。听见动静的敌人画 ~。")
     print(game.render())
     print(f"玩家 HP: {game.player_hp}/{game.player_max_hp} | 背包: {_bag_str(game)}")
 
@@ -285,7 +307,7 @@ def main() -> None:
             print(f"   HP: {game.player_hp}/{game.player_max_hp}"
                   + (f" | 存活敌人: {len(alive)}" if alive else " | 本层已清场")
                   + f" | 背包: {_bag_str(game)}（{len(game.inventory)}/5）"
-                  + _stealth_str(game))
+                  + _stealth_str(game) + _noise_str(game))
 
         if game.depth != shown_depth:
             shown_depth = game.depth

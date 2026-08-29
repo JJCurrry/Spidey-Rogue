@@ -1,4 +1,4 @@
-"""M1~M7：格子地图 + 玩家移动 + 战斗系统 + 怪物 AI + 道具背包 + 程序化关卡 + 视野渲染 + 怪物感知潜行（蜘蛛侠 MCU 荷兰弟版主题）。
+"""M1~M8：格子地图 + 玩家移动 + 战斗系统 + 怪物 AI + 道具背包 + 程序化关卡 + 视野渲染 + 怪物感知潜行 + 噪音听觉（蜘蛛侠 MCU 荷兰弟版主题）。
 
 注意（不变量 #1）：随机经 RandomSource 注入；本模块不直接引入随机模块。
 注意（GB-1 边界地雷）：不可走出边界、不可走入墙、不可走入怪物。
@@ -10,15 +10,19 @@
                   （唯一例外：开启视野时「已探索记忆」集合单调增长）。
 注意（不变量 #9）：怪物感知是纯几何、不消耗 RandomSource；潜行默认关闭
                   （stealth=False ⇒ 怪物恒为「已察觉」，M1~M6 的行为一字节不变）。
+注意（不变量 #10）：声音传播是纯几何、不消耗 RandomSource；听觉默认关闭
+                  （noise=False ⇒ 只有视觉，M1~M7 的行为一字节不变）。
 """
 from __future__ import annotations
 from typing import NamedTuple
 from .rng import RandomSource
 from .tiles import (WALL, FLOOR, PLAYER, MONSTER, ITEM, STAIRS, UNSEEN, SENSE,
-                    UNAWARE)
+                    UNAWARE, HEARD)
 from .level import Level, Room, generate_level, TUTORIAL_LEVEL_NAME
 from .fov import (SIGHT_RADIUS, SPIDER_SENSE_RADIUS, MONSTER_SIGHT_RADIUS,
                   visible_tiles, in_spider_sense, monster_can_see)
+from .sound import (NOISE_COST_FLOOR, NOISE_COST_WALL, noise_field,
+                    noise_reaches)
 
 # M1 采用固定小房间（程序化生成见 M5 的 level.py；默认仍是这张教学图）
 _MAP = [
@@ -41,6 +45,16 @@ MONSTER_WANDER_PROB = 0.5      # 随机游走怪「偶尔改为追击」的概�
 ALERT_MEMORY = 3               # 失去视线后还会扑向「最后目击点」搜捕几个回合
 SNEAK_ATTACK_MULT = 2          # 倒挂突袭的伤害倍率（趁敌人还没反应过来）
 WEB_STRIKE_RANGE = 2           # 蛛网摆荡突袭的射程：最多荡几步（沿可通行格，不穿墙）
+
+# M8 噪音与听觉（四条响度都是确定性常数，不掷骰 ⇒ 不扰动随机序列，#2/#10）
+# 走路 / 拾取 / 吃三明治 / 注射纳米强化剂全部**无声**：蜘蛛侠落地无响，
+# 「发声」始终是玩家自己的选择——不做动作就不会暴露。
+NOISE_PUNCH = 6                # 蛛网拳（正面交手，动静传半条走廊）
+NOISE_SNEAK = 2                # 倒挂突袭（闷哼，几乎无声 ⇒ 摸掉哨兵未必惊动全层）
+NOISE_STRUGGLE = 7             # 被蛛网弹缠住的怪挣扎的动静（声源在**怪物**处 ⇒ 调虎离山）
+NOISE_LANDING = 8              # 进入新楼层的落地声（刚落地就惊动一圈人）
+CAUSE_SIGHT = "sight"          # 被惊动的原因：看见你了
+CAUSE_SOUND = "sound"          # 被惊动的原因：听见动静了（渲染为 `~`）
 
 # M4 道具与背包（蜘蛛侠主题：梅姨的爱心便当、备用蛛网芯、斯塔克的纳米科技）
 INVENTORY_CAPACITY = 5         # 不变量 #5：背包容量上限
@@ -126,15 +140,24 @@ class Monster:
         self.alert_turns = 0       # 失去视线后还会搜捕几个回合（递减到 0 即放弃）
         self.last_seen = None      # 最后看见玩家的位置（搜捕目标，不是全知追踪）
         self.home = (x, y)         # 巢位：未察觉时回这里待命
+        # M8 被惊动的原因：看见（`CAUSE_SIGHT`）/ 听见（`CAUSE_SOUND`）/ 尚未惊动（None）
+        # 只用于让画面区分「它看见你了」与「它只是听见动静」——不参与任何伤害或命中判定。
+        self.alert_cause: str | None = CAUSE_SIGHT
 
     @property
     def alive(self) -> bool:
         return self.hp > 0
 
-    def alert(self, pos: tuple[int, int] | None = None) -> None:
-        """被惊动：记下最后目击点并重置搜捕计时（不变量 #9：不掷骰）。"""
+    def alert(self, pos: tuple[int, int] | None = None,
+              cause: str = CAUSE_SIGHT) -> None:
+        """被惊动：记下最后目击点并重置搜捕计时（不变量 #9/#10：不掷骰）。
+
+        cause 记下是「看见」还是「听见」——它扑向的 `last_seen` 在听觉情形下是**声源**，
+        未必是玩家的真实位置（这就是「调虎离山」成立的地方）。
+        """
         self.alerted = True
         self.alert_turns = ALERT_MEMORY
+        self.alert_cause = cause
         if pos is not None:
             self.last_seen = tuple(pos)
 
@@ -143,6 +166,7 @@ class Monster:
         self.alerted = False
         self.alert_turns = 0
         self.last_seen = None
+        self.alert_cause = None
 
     def take_damage(self, dmg: int) -> int:
         # 不变量 #3：HP 永不为负（引擎保证，业务不得直接写负）
@@ -153,7 +177,7 @@ class Monster:
 class Game:
     def __init__(self, rng: RandomSource | None = None, level: Level | None = None,
                  populate: bool = True, fov: bool = False,
-                 stealth: bool = False) -> None:
+                 stealth: bool = False, noise: bool = False) -> None:
         """rng 为注入的随机源；level 为 None 时用 M1 的固定教学图，否则装载程序化楼层。
 
         populate 控制装载时是否自动撒怪与补给（测试生成期结构时可关掉）。
@@ -161,6 +185,8 @@ class Game:
         保证 M1~M5 的既有规格不被打破；显式传入 True 才走迷雾渲染）。
         stealth 控制是否开启怪物感知与潜行（M7，默认关闭 ⇒ 怪物恒为「已察觉」，
         M1~M6 的追击行为一字节不变；显式传入 True 才需要「不被发现」地接近）。
+        noise 控制是否开启噪音与听觉（M8，默认关闭 ⇒ 只有视觉一条感知通道，
+        M1~M7 的行为一字节不变；显式传入 True 后「动静」也会惊动敌人）。
         """
         self.rng = rng or RandomSource(0)
         # M6 视野状态：fov_enabled 是渲染开关，visible/explored 是它的产物
@@ -170,6 +196,10 @@ class Game:
         # M7 潜行状态：stealth_enabled 是感知开关，Monster.alerted 是它的产物
         self.stealth_enabled = stealth
         self.last_attack_sneak = False  # 上一次成功出手是否为倒挂突袭（供渲染/演示读取）
+        # M8 听觉状态：noise_enabled 是听觉开关，Monster.alert_cause 是它的产物
+        self.noise_enabled = noise
+        self.last_noise_loudness = 0    # 上一次发声的响度（0 = 还没发出过动静）
+        self.last_noise_heard = 0       # 上一次动静惊动了几只敌人（供演示读取）
         # M2 玩家状态（跨层保留：HP / 背包 / 纳米加成）
         self.player_max_hp = PLAYER_MAX_HP
         self.player_hp = PLAYER_MAX_HP
@@ -267,8 +297,12 @@ class Game:
         if sneak:
             dmg *= SNEAK_ATTACK_MULT
         dead = self._damage_monster(monster, dmg)
+        # M8：出手就有动静——先让声音扩散（除被打的那只，它下面另行记成「看得见」）
+        self.emit_noise(self.px, self.py,
+                        NOISE_SNEAK if sneak else NOISE_PUNCH)
         if not dead:
-            monster.alert((self.px, self.py))  # 挨了一下，不可能还不知道人在哪
+            # 挨了一下，不可能还不知道人在哪 ⇒ 记成「看见」，而不是「听见」
+            monster.alert((self.px, self.py))
             if not sneak:
                 self._hurt_player(monster.attack)
         self.last_attack_sneak = sneak
@@ -542,6 +576,50 @@ class Game:
         """还没发现玩家的存活怪物（潜行关闭时恒为空）。"""
         return [m for m in self.monsters if m.alive and not m.alerted]
 
+    def heard_monsters(self) -> list[Monster]:
+        """听见动静（而非看见你）才被惊动的存活怪物（听觉关闭时恒为空）。"""
+        return [m for m in self.monsters
+                if m.alive and m.alerted and m.alert_cause == CAUSE_SOUND]
+
+    # ---------- M8 噪音与听觉（声音传播）----------
+    # 不变量 #10：传播是纯几何（`sound.noise_field`：Dijkstra 最短代价，空地 1 / 墙 3），
+    #            不消耗 RandomSource ⇒ 不扰动战斗/掉落/生成的随机序列；
+    #            「是否被听到」只经 `Monster.alert(cause=CAUSE_SOUND)` 这一入口生效，不额外掷骰。
+    # 设计要点（ADR-004）：声源**未必**是玩家——被蛛网弹缠住的怪自己会挣扎出声，
+    #            于是同伴被引向它而不是你 ⇒ 听觉不只添压力，还添了一条「调虎离山」的解法。
+    def emit_noise(self, x: int, y: int, loudness: int) -> list[Monster]:
+        """在 (x,y) 处发出响度 loudness 的动静，惊动听得见的敌人。
+
+        被惊动者扑向**声源**（`last_seen = (x,y)`），不是玩家的实时位置——
+        所以声源不在你脚下时，它们会被误导到别处去（这是「调虎离山」的成立条件）。
+        听觉关闭时本函数是空操作（返回空表），M1~M7 的行为一字节不变（不变量 #10）。
+        返回本次被惊动的敌人（按生成顺序 ⇒ 确定性）。
+        """
+        if not self.noise_enabled:
+            return []
+        heard = self.monsters_hearing(x, y, loudness)
+        for m in heard:
+            m.alert((x, y), cause=CAUSE_SOUND)
+        self.last_noise_loudness = loudness
+        self.last_noise_heard = len(heard)
+        return heard
+
+    def monsters_hearing(self, x: int, y: int,
+                         loudness: int) -> list[Monster]:
+        """哪些存活怪物听得见 (x,y) 处响度 loudness 的动静（纯查询，不改状态）。
+
+        与 `monster_can_see_player` 同一哲学：查询照实回答「听不听得见」，
+        至于这个结果要不要作用于 AI，由 `noise_enabled` 开关决定。
+        """
+        field = noise_field(self.grid, (x, y), loudness)
+        return [m for m in self.monsters if m.alive and (m.x, m.y) in field]
+
+    def can_hear(self, monster: Monster, x: int, y: int, loudness: int) -> bool:
+        """这只怪物能否听见 (x,y) 处的动静（纯几何、零随机；死怪一律听不见）。"""
+        if not monster.alive:
+            return False
+        return noise_reaches(self.grid, (x, y), (monster.x, monster.y), loudness)
+
     # ---------- M4 道具与背包 ----------
     # 不变量 #1：掉落判定与掉落种类必须走 self.rng（RandomSource）；本模块不直接引入随机模块。
     # 不变量 #2：掉落只在「怪物阵亡」这一确定性事件上掷骰 ⇒ 同 seed + 同输入序列 ⇒ 同掉落。
@@ -597,6 +675,9 @@ class Game:
             self._damage_monster(target, WEB_SHOT_DMG)
             if target.alive:
                 target.stunned = WEB_SHOT_STUN_TURNS
+                # M8：被缠住的怪会挣扎，动静从**它自己**那儿传出去 ⇒
+                # 同伴被引向它而不是玩家 —— 这就是「调虎离山」的成立条件。
+                self.emit_noise(target.x, target.y, NOISE_STRUGGLE)
         elif item.key == "nano_boost":
             self.player_dmg_bonus += NANO_BOOST_DMG
         else:
@@ -634,14 +715,16 @@ class Game:
     # 不变量 #7：楼层由 level.generate_level 保证连通，玩家起点可达全部可通行格。
     @classmethod
     def procedural(cls, rng: RandomSource, depth: int = 1,
-                   fov: bool = False, stealth: bool = False) -> "Game":
+                   fov: bool = False, stealth: bool = False,
+                   noise: bool = False) -> "Game":
         """开一局程序化楼层：生成与撒点共用同一个 rng，先后固定（#1/#2）。
 
         fov=True 时开启视野/迷雾（M6，默认关闭）；
-        stealth=True 时开启怪物感知与潜行（M7，默认关闭）。
+        stealth=True 时开启怪物感知与潜行（M7，默认关闭）；
+        noise=True 时开启噪音与听觉（M8，默认关闭）。
         """
         return cls(rng=rng, level=generate_level(rng, depth=depth),
-                   fov=fov, stealth=stealth)
+                   fov=fov, stealth=stealth, noise=noise)
 
     def load_level(self, level: Level, populate: bool = True) -> None:
         """装载一层程序化楼层：重置地形与实体，**保留**玩家 HP / 背包 / 伤害加成。
@@ -715,10 +798,15 @@ class Game:
         return self.stairs is not None and (self.px, self.py) == self.stairs
 
     def descend(self) -> bool:
-        """下潜到下一层：重生成楼层、重置实体，保留 HP / 背包 / 伤害加成。"""
+        """下潜到下一层：重生成楼层、重置实体，保留 HP / 背包 / 伤害加成。
+
+        M8：落地有声——刚落到新一层时的动静会惊动附近的人（`NOISE_LANDING`）。
+        只有**下潜**才落地（开局你已经在楼里了），所以发声点在这里而不在 `load_level`。
+        """
         if not self.can_descend():
             return False
         self.load_level(generate_level(self.rng, depth=self.depth + 1))
+        self.emit_noise(self.px, self.py, NOISE_LANDING)
         return True
 
     # ---------- M6 视野 / 渲染层（蜘蛛感应）----------
@@ -760,6 +848,18 @@ class Game:
             return self._render_fog()
         return self._render_full()
 
+    def _monster_glyph(self, m: Monster) -> str:
+        """怪物的渲染字形（只读状态，不变量 #8/#10）。
+
+        未察觉 `m` ｜ 听见动静但还没看见你 `~` ｜ 已看见你 `M`。
+        听觉关闭时不会出现 `~`（没人会是 `CAUSE_SOUND`）⇒ 既有断言仍成立。
+        """
+        if not m.alerted:
+            return UNAWARE
+        if self.noise_enabled and m.alert_cause == CAUSE_SOUND:
+            return HEARD
+        return MONSTER
+
     def _render_full(self) -> str:
         """M1~M5 的全图渲染（视野关闭时的路径，既有规格都跑在这条上）。"""
         view = [list(row) for row in self.grid]
@@ -774,8 +874,8 @@ class Game:
                 view[it.y][it.x] = ITEM
         for m in self.monsters:
             if m.alive and self.in_bounds(m.x, m.y):
-                # M7：未察觉的敌人画小写 m（可以从背后倒挂突袭）；潜行关闭时全是大写 M
-                view[m.y][m.x] = MONSTER if m.alerted else UNAWARE
+                # M7/M8：未察觉画小写 m（可从背后倒挂突袭）、听见动静画 ~、已看见画 M
+                view[m.y][m.x] = self._monster_glyph(m)
         return "\n".join("".join(row) for row in view)
 
     def _render_fog(self) -> str:
@@ -807,9 +907,9 @@ class Game:
             if self.in_bounds(it.x, it.y) and self.is_explored(it.x, it.y):
                 view[it.y][it.x] = ITEM
         # 5) 怪物：只在**当前可见**时画（怪物会跑，记忆里的位置会骗人）；
-        #    M7：未察觉的画小写 m，已察觉的画 M
+        #    M7/M8：未察觉画小写 m、听见动静画 ~、已看见画 M
         for m in self.visible_monsters():
-            view[m.y][m.x] = MONSTER if m.alerted else UNAWARE
+            view[m.y][m.x] = self._monster_glyph(m)
         # 6) 玩家恒可见
         view[self.py][self.px] = PLAYER
         return "\n".join("".join(row) for row in view)
