@@ -1,0 +1,114 @@
+# roguelike-ai-coding · 用 AI Coding 标准方法从 0 做的终端 Roguelike
+
+> 这是一个**示范仓库**：把培训 `ai-coding-method` 的「七件套制品 + 流水线」
+> 落到一个能跑、能提交、能被门禁拦下的真实游戏项目上。
+> 你在**新工作空间**打开它，新会话读 `CLAUDE.md` 就能接手，不靠聊天记录。
+
+---
+
+## 0. 一句话对应表（培训概念 ↔ git 落点）
+
+| 培训材料说的 | 在 git 上的形态 | 本仓库位置 |
+|---|---|---|
+| **七件套制品** | 版本化 `.md` 文件，随代码提交 | `docs/`（工单/接力/不变量/术语/地图/adr）+ `CLAUDE.md` |
+| **① CLAUDE.md 根索引** | 每会话自动读取的入口，≤100 行只放指针 | 根目录 `CLAUDE.md` |
+| **③ 接力文件（交接棒）** | 普通文件，**内含 commit hash + 下一步指令** | `docs/接力/HANDOFF-T001.md` |
+| **② 任务工单** | 一入一出 + 委托级别 + 验收分级 A-B-C + 变更记录 | `docs/工单/T-001*.md` |
+| **⑤ 不变量（红线）** | 文档 + **可机器判定**检查（L1 墙 seed-guard） | `docs/不变量.md` #1 Seed 注入 + `scripts/gate.py` |
+| **流水线 L1 墙** | 四道门，提交瞬间拦截 | `scripts/gate.py` + `scripts/hooks/pre-commit` |
+| **评审流水线 5 监理** | 多角色证据式审查 | `scripts/review_pipeline.py` |
+| **合并门** | 必需评审 / 禁直推 | `CODEOWNERS` + `.github/branch-protection.md` + PR 模板 |
+
+> 本仓库与 `ai-coding-git-demo` 同构，把"Clock 注入"红线换成了游戏里更直观的
+> **"Seed 随机必须注入"** 红线——这是 AI Coding「可测性」最经典的纪律。
+
+---
+
+## 1. 怎么跑起来
+
+```bash
+# 0) 装好 Python 3.11+（游戏运行需要；门禁也需要）
+python --version
+
+# 1) 玩一下（ASCII 渲染 + 示例移动）
+python main.py
+
+# 2) 跑 L1 墙四道门（每次改动前必跑）
+python scripts/gate.py
+
+# 3) 跑评审流水线 5 监理
+python scripts/review_pipeline.py
+```
+
+预期：`main.py` 打印初始地图与一次移动后的地图；`gate.py` 四道门 ALL GREEN（7 测试全绿）；`review_pipeline.py` 无 HIGH。
+
+---
+
+## 2. 在新工作空间开新会话时，贴这段话
+
+> 这是一个用 AI Coding 方法开发的终端 Roguelike（仓库 `roguelike-ai-coding`）。
+> 请先读根目录 `CLAUDE.md`，再按 `docs/工单/` 和 `docs/接力/` 接手下一个里程碑。
+> 改动前先跑 `python scripts/gate.py`，全绿才能提交；
+> **禁止裸调 `random`/`secrets`/`os.urandom`**——随机必须走 `src/rogue/rng.py` 的 `RandomSource`（Seed 注入）。
+> 一个里程碑 = 一次提交；提交前更新接力文件（含本次 commit）。
+
+新会话读完 `CLAUDE.md + 工单 T-001 + 接力 HANDOFF-T001`，就知道：
+M1（格子+移动）已经做完（commit `fdfaa307`），下一步该做 **M2 战斗系统**。
+
+---
+
+## 3. 后续里程碑（一个人持续迭代的路线）
+
+| 里程碑 | 内容 | 触碰的红线 / 纪律 |
+|---|---|---|
+| M1 ✅ | 格子地图 + 玩家移动 | Seed 注入（暂不触发，地图固定） |
+| M2 | 战斗系统（玩家/怪物 HP、攻击结算） | #3 HP≥0、#2 回合确定性（用 Seed） |
+| M3 | 怪物 AI（简单追击/随机游走） | #1 随机走 `RandomSource` |
+| M4 | 道具 / 背包 | 背包容量上限（待生效红线） |
+| M5 | 程序化关卡生成 | #1 生成随机走 Seed、#2 确定性 |
+| M6 | 视野 / 渲染层 | —— |
+
+每完成一个里程碑：跑 `gate` 全绿 → 更新 `docs/接力/*.md`（含本次 commit）→ 提交。
+
+---
+
+## 4. 推到远程（真正"上 git"）
+
+```bash
+# 在 GitHub/Gitee/GitLab 建【空】仓库（别勾 README 初始化）
+git remote add origin https://github.com/<你>/roguelike-ai-coding.git
+git push -u origin main
+```
+
+推送后去平台 `Settings → Branches` 给 `main` 开分支保护（规则见 `.github/branch-protection.md`），
+把"合并门"在真实平台上立起来。认证用 **Personal Access Token**，不是密码。
+
+---
+
+## 5. 目录速览
+
+```
+roguelike-ai-coding/
+├── CLAUDE.md                     ① 根索引（≤100 行，只放指针）
+├── CODEOWNERS                    合并门 · 必需评审
+├── main.py                       运行入口：python main.py
+├── scripts/
+│   ├── gate.py                   L1 墙四道门（编译/seed-guard/测试/棘轮）
+│   ├── review_pipeline.py        评审流水线 5 监理
+│   ├── hooks/pre-commit          提交瞬间调用 gate.py
+│   ├── gate.{sh,ps1}             本地/CI 共用入口
+│   └── .ratchet                  覆盖率棘轮基线（=7）
+├── src/rogue/
+│   ├── __init__.py               暴露 Game / RandomSource
+│   ├── rng.py                    ★ 唯一 random 入口（RandomSource，Seed 注入）
+│   ├── game.py                   M1：格子地图 + 玩家移动（不含随机）
+│   └── __main__.py               python -m rogue
+├── tests/test_game.py            unittest 零依赖（7 例行为规格）
+└── docs/                         七件套
+    ├── 不变量.md                ⑤ 红线（#1 Seed 注入）
+    ├── 术语表.md                ⑥ 只收望文生义会错的词
+    ├── 地图.md                  ⑦ 架构地图
+    ├── adr/ADR-001-技术选型.md  ④ 决策记录
+    ├── 工单/T-001*.md           ② 一入一出 + 委托级别 + 验收分级
+    └── 接力/HANDOFF-T001.md     ③ 交接棒（含 commit + 下一步）
+```
