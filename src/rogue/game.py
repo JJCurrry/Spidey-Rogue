@@ -1,4 +1,4 @@
-"""M1~M6：格子地图 + 玩家移动 + 战斗系统 + 怪物 AI + 道具背包 + 程序化关卡 + 视野渲染（蜘蛛侠 MCU 荷兰弟版主题）。
+"""M1~M7：格子地图 + 玩家移动 + 战斗系统 + 怪物 AI + 道具背包 + 程序化关卡 + 视野渲染 + 怪物感知潜行（蜘蛛侠 MCU 荷兰弟版主题）。
 
 注意（不变量 #1）：随机经 RandomSource 注入；本模块不直接引入随机模块。
 注意（GB-1 边界地雷）：不可走出边界、不可走入墙、不可走入怪物。
@@ -8,13 +8,17 @@
 注意（不变量 #7）：程序化楼层中玩家起点可达全部可通行格（生成期保证 + 洪泛兜底）。
 注意（不变量 #8）：render() 只依赖地形 + 实体 + 玩家位置，不改写任何游戏状态
                   （唯一例外：开启视野时「已探索记忆」集合单调增长）。
+注意（不变量 #9）：怪物感知是纯几何、不消耗 RandomSource；潜行默认关闭
+                  （stealth=False ⇒ 怪物恒为「已察觉」，M1~M6 的行为一字节不变）。
 """
 from __future__ import annotations
 from typing import NamedTuple
 from .rng import RandomSource
-from .tiles import WALL, FLOOR, PLAYER, MONSTER, ITEM, STAIRS, UNSEEN, SENSE
+from .tiles import (WALL, FLOOR, PLAYER, MONSTER, ITEM, STAIRS, UNSEEN, SENSE,
+                    UNAWARE)
 from .level import Level, Room, generate_level, TUTORIAL_LEVEL_NAME
-from .fov import (SIGHT_RADIUS, SPIDER_SENSE_RADIUS, visible_tiles, in_spider_sense)
+from .fov import (SIGHT_RADIUS, SPIDER_SENSE_RADIUS, MONSTER_SIGHT_RADIUS,
+                  visible_tiles, in_spider_sense, monster_can_see)
 
 # M1 采用固定小房间（程序化生成见 M5 的 level.py；默认仍是这张教学图）
 _MAP = [
@@ -32,6 +36,11 @@ PLAYER_DMG_VARIANCE = 3        # 伤害浮动区间 [0, 3]，经 Seed 注入（�
 
 # M3 怪物 AI（蜘蛛侠主题：街头小混混追击、迷途无人机随机游走）
 MONSTER_WANDER_PROB = 0.5      # 随机游走怪「偶尔改为追击」的概率（仅 wander 行为消耗 RandomSource，#1）
+
+# M7 怪物感知与潜行（三条常量都是确定性常数，不掷骰 ⇒ 不扰动随机序列，#2/#9）
+ALERT_MEMORY = 3               # 失去视线后还会扑向「最后目击点」搜捕几个回合
+SNEAK_ATTACK_MULT = 2          # 倒挂突袭的伤害倍率（趁敌人还没反应过来）
+WEB_STRIKE_RANGE = 2           # 蛛网摆荡突袭的射程：最多荡几步（沿可通行格，不穿墙）
 
 # M4 道具与背包（蜘蛛侠主题：梅姨的爱心便当、备用蛛网芯、斯塔克的纳米科技）
 INVENTORY_CAPACITY = 5         # 不变量 #5：背包容量上限
@@ -112,10 +121,28 @@ class Monster:
         self.behavior = behavior
         # M4 束缚状态：>0 时跳过接下来若干次行动（蛛网弹命中后置位）
         self.stunned = 0
+        # M7 警觉状态机（潜行默认关闭 ⇒ alerted 恒为 True，行为与 M3 完全一致）
+        self.alerted = True        # 是否已发现玩家
+        self.alert_turns = 0       # 失去视线后还会搜捕几个回合（递减到 0 即放弃）
+        self.last_seen = None      # 最后看见玩家的位置（搜捕目标，不是全知追踪）
+        self.home = (x, y)         # 巢位：未察觉时回这里待命
 
     @property
     def alive(self) -> bool:
         return self.hp > 0
+
+    def alert(self, pos: tuple[int, int] | None = None) -> None:
+        """被惊动：记下最后目击点并重置搜捕计时（不变量 #9：不掷骰）。"""
+        self.alerted = True
+        self.alert_turns = ALERT_MEMORY
+        if pos is not None:
+            self.last_seen = tuple(pos)
+
+    def calm(self) -> None:
+        """放弃搜捕：回到「未察觉」，回巢待命（不变量 #9：不掷骰）。"""
+        self.alerted = False
+        self.alert_turns = 0
+        self.last_seen = None
 
     def take_damage(self, dmg: int) -> int:
         # 不变量 #3：HP 永不为负（引擎保证，业务不得直接写负）
@@ -125,18 +152,24 @@ class Monster:
 
 class Game:
     def __init__(self, rng: RandomSource | None = None, level: Level | None = None,
-                 populate: bool = True, fov: bool = False) -> None:
+                 populate: bool = True, fov: bool = False,
+                 stealth: bool = False) -> None:
         """rng 为注入的随机源；level 为 None 时用 M1 的固定教学图，否则装载程序化楼层。
 
         populate 控制装载时是否自动撒怪与补给（测试生成期结构时可关掉）。
         fov 控制是否开启视野/迷雾（M6，默认关闭 ⇒ render() 仍是全图，
         保证 M1~M5 的既有规格不被打破；显式传入 True 才走迷雾渲染）。
+        stealth 控制是否开启怪物感知与潜行（M7，默认关闭 ⇒ 怪物恒为「已察觉」，
+        M1~M6 的追击行为一字节不变；显式传入 True 才需要「不被发现」地接近）。
         """
         self.rng = rng or RandomSource(0)
         # M6 视野状态：fov_enabled 是渲染开关，visible/explored 是它的产物
         self.fov_enabled = fov
         self.visible: set[tuple[int, int]] = set()
         self.explored: set[tuple[int, int]] = set()
+        # M7 潜行状态：stealth_enabled 是感知开关，Monster.alerted 是它的产物
+        self.stealth_enabled = stealth
+        self.last_attack_sneak = False  # 上一次成功出手是否为倒挂突袭（供渲染/演示读取）
         # M2 玩家状态（跨层保留：HP / 背包 / 纳米加成）
         self.player_max_hp = PLAYER_MAX_HP
         self.player_hp = PLAYER_MAX_HP
@@ -197,8 +230,12 @@ class Game:
         """在 (x,y) 生成一只怪物（M5 起由 _populate_level 代为撒点，手摆仅用于演示/测试）。
 
         behavior: "chase" 贪心追击 / "wander" 随机游走（随机仅经 RandomSource，#1）。
+        M7：潜行开启时新怪是「未察觉」的（刚刷出来还没发现玩家），
+        第一次 `monster_turn` 的感知更新会决定它是否被立刻惊动。
         """
         m = Monster(name, x, y, hp, attack, behavior)
+        if self.stealth_enabled:
+            m.calm()
         self.monsters.append(m)
         return m
 
@@ -216,19 +253,93 @@ class Game:
         """玩家攻击相邻怪物（蛛网拳 / Web-Strike）。
 
         伤害 = 基础(+纳米加成) + Seed 注入的随机浮动（不变量 #1/#2：相同 seed + 相同攻击序列 ⇒ 相同伤害）。
-        怪物存活则反击玩家（固定值，保持简单；确定性仍由同一 rng 序列保障）。
+        M7 潜行：目标尚未察觉 ⇒ **倒挂突袭**——伤害 × SNEAK_ATTACK_MULT（确定性常数，
+        不额外掷骰，#9），且敌人来不及反击；命中后它立刻转为已察觉（下回合照样还手）。
+        普通攻击仍是 M2 的规则：怪物存活则反击玩家。
         怪物阵亡则按 Seed 掷一次掉落（M4，#1/#2）。
-        返回 (造成的伤害, 怪物是否阵亡)。
+        返回 (造成的伤害, 怪物是否阵亡)；是否突袭读 `self.last_attack_sneak`。
         """
-        if not monster.alive:
+        if not monster.alive or not self.is_adjacent(monster.x, monster.y):
+            self.last_attack_sneak = False
             return 0, False
-        if not self.is_adjacent(monster.x, monster.y):
-            return 0, False
+        sneak = self.can_sneak_attack(monster)
         dmg = PLAYER_BASE_DMG + self.player_dmg_bonus + self.rng.int(0, PLAYER_DMG_VARIANCE)
+        if sneak:
+            dmg *= SNEAK_ATTACK_MULT
         dead = self._damage_monster(monster, dmg)
         if not dead:
-            self._hurt_player(monster.attack)
+            monster.alert((self.px, self.py))  # 挨了一下，不可能还不知道人在哪
+            if not sneak:
+                self._hurt_player(monster.attack)
+        self.last_attack_sneak = sneak
         return dmg, dead
+
+    def web_strike(self, target: Monster) -> tuple[int, bool] | None:
+        """M7 蛛网摆荡突袭：荡到目标身旁并立刻出手（移动 + 攻击同一回合）。
+
+        这是**主动**潜行唯一的时间窗口——怪物的感知只在世界回合**开始时**更新一次
+        （`monster_turn` → `update_awareness`），所以从它看不见的地方荡过去时，
+        它还停留在「未察觉」状态，打的就是背身。
+        （只走一步是摸不到「看不见你的怪」的：相邻格之间必有视线，见 ADR-003；
+          摆荡射程 `WEB_STRIKE_RANGE=2` 让「隔着一堵墙拐角」成为可能。）
+
+        落地格：目标四方向相邻、且玩家沿可通行格 `WEB_STRIKE_RANGE` 步内可达
+        （蛛丝只在可通行的空间里荡，不穿墙 ⇒ 不变量 #4 仍成立）。
+        已经与目标相邻 ⇒ 直接出手、不移动；够不着或目标已阵亡 ⇒ 原地不动、返回 None。
+        返回 `player_attack` 的 (伤害, 是否阵亡)。
+        """
+        if not target.alive:
+            return None
+        if self.is_adjacent(target.x, target.y):
+            return self.player_attack(target)
+        path = self._strike_path(target)
+        if path is None:
+            return None
+        for dx, dy in path:
+            if not self.move(dx, dy):
+                return None
+        return self.player_attack(target)
+
+    def _strike_path(self, target: Monster) -> list[tuple[int, int]] | None:
+        """摆荡路径：玩家 →「目标旁能站人的格子」的最短四方向路径（≤ WEB_STRIKE_RANGE 步）。
+
+        逐层 BFS、方向顺序固定 ⇒ 最短路且确定性（#2）。够不着则返回 None（不移动）。
+        """
+        goals = {(target.x + dx, target.y + dy)
+                 for dx, dy in ((0, -1), (0, 1), (-1, 0), (1, 0))}
+        goals = {p for p in goals if self._monster_can_enter(*p)}
+        if not goals:
+            return None
+        prev = {(self.px, self.py): None}
+        frontier = [(self.px, self.py)]
+        found = None
+        for _ in range(WEB_STRIKE_RANGE):
+            nxt: list[tuple[int, int]] = []
+            for (x, y) in frontier:
+                for dx, dy in ((0, -1), (0, 1), (-1, 0), (1, 0)):
+                    n = (x + dx, y + dy)
+                    if n in prev or not self._monster_can_enter(*n):
+                        continue  # 不变量 #4：不越界/穿墙/踩玩家/踩怪
+                    prev[n] = (x, y)
+                    if n in goals:
+                        found = n
+                        break
+                    nxt.append(n)
+                if found is not None:
+                    break
+            if found is not None:
+                break
+            frontier = nxt
+        if found is None:
+            return None
+        path: list[tuple[int, int]] = []
+        node = found
+        while prev[node] is not None:
+            p = prev[node]
+            path.append((node[0] - p[0], node[1] - p[1]))
+            node = p
+        path.reverse()
+        return path
 
     def _damage_monster(self, monster: Monster, dmg: int) -> bool:
         """对怪物造成伤害；阵亡则掷掉落。返回是否阵亡（不变量 #3 由 take_damage 保证）。"""
@@ -252,7 +363,14 @@ class Game:
     # 不变量 #2：同 seed + 同玩家输入序列 ⇒ 同结果；AI 不引入隐藏随机源（chase 不消耗 rng，保持纯确定性）。
     # 不变量 #4：AI 移动不可越界 / 穿墙 / 踩玩家 / 踩其它怪物（由 _monster_can_enter 把关）。
     def monster_turn(self) -> None:
-        """推进所有存活怪物的 AI（一个世界回合）。顺序固定 ⇒ 确定性（#2）。"""
+        """推进所有存活怪物的 AI（一个世界回合）。顺序固定 ⇒ 确定性（#2）。
+
+        M7：潜行开启时，回合**开始**先统一更新一次感知——「谁看见了蜘蛛侠」。
+        这个时机是潜行成立的关键：玩家在自己回合里从敌人视野外扑到面前时，
+        敌人还停留在上一回合的「未察觉」状态 ⇒ 突袭窗口天然存在（见 ADR-003）。
+        """
+        if self.stealth_enabled:
+            self.update_awareness()
         for m in self.monsters:
             self.monster_act(m)
 
@@ -270,16 +388,53 @@ class Game:
         candidates = self._valid_monster_moves(m)
         if not candidates:
             return  # 无路可走，原地待命
-        if m.behavior == "wander":
-            # 随机游走：偶尔改为追击；方向选择走 RandomSource（#1）
-            if self.rng.chance(MONSTER_WANDER_PROB):
-                step = self._step_toward(candidates)
-            else:
-                step = self.rng.choice(candidates)
-        else:  # chase：贪心逼近，确定性、不消耗 rng
-            step = self._step_toward(candidates)
+        step = self._pick_monster_step(m, candidates)
         if step:
             m.x, m.y = step
+
+    def _pick_monster_step(self, m: Monster,
+                           candidates: list[tuple[int, int]]) -> tuple[int, int] | None:
+        """「往哪走一步」的决策（抽出来只为让 monster_act 保持可读）。
+
+        潜行关闭：完全沿用 M3——chase 贪心逼近玩家；wander 随机游走、偶尔改为追击。
+        潜行开启：
+          - 已察觉：扑向「最后目击点」`last_seen`（不是全知追踪）；
+            踏到那儿还没看见人 ⇒ 搜捕计时 -1，耗尽就放弃、回巢待命。
+          - 未察觉：chase 怪回巢（确定性、不消耗 rng）；wander 怪照旧随机游走，
+            只是「偶尔改为追击」变成「偶尔改为回巢」。
+        """
+        if not self.stealth_enabled:
+            if m.behavior == "wander":
+                # 随机游走：偶尔改为追击；方向选择走 RandomSource（#1）
+                if self.rng.chance(MONSTER_WANDER_PROB):
+                    return self._step_toward(candidates)
+                return self.rng.choice(candidates)
+            return self._step_toward(candidates)  # chase：贪心逼近，确定性、不消耗 rng
+
+        if m.alerted:
+            goal = m.last_seen or (self.px, self.py)
+            if (m.x, m.y) == goal:
+                self._lose_interest(m)  # 站在最后目击点上没看见人 ⇒ 放弃一层
+                return None
+            step = self._step_toward_point(candidates, goal, close_in=True)
+            if step == goal:
+                self._lose_interest(m)  # 这一步踏上了最后目击点
+            return step
+        # 未察觉：chase 怪回巢待命（已在家则原地不动），wander 怪照旧游荡、偶尔想起回巢
+        if m.behavior == "wander":
+            go_home = self.rng.chance(MONSTER_WANDER_PROB)
+            if go_home and (m.x, m.y) != m.home:
+                return self._step_toward_point(candidates, m.home, close_in=True)
+            return self.rng.choice(candidates)
+        if (m.x, m.y) == m.home:
+            return None  # 守着自己的地盘，不瞎晃
+        return self._step_toward_point(candidates, m.home, close_in=True)
+
+    def _lose_interest(self, m: Monster) -> None:
+        """搜捕计时 -1，归零则放弃（纯状态推进，不掷骰 ⇒ 确定性，#2/#9）。"""
+        m.alert_turns -= 1
+        if m.alert_turns <= 0:
+            m.calm()
 
     def monster_attack(self, m: Monster) -> int:
         """怪物攻击相邻玩家（固定伤害，确定性；不变量 #3 由 _hurt_player 钳制）。"""
@@ -312,14 +467,80 @@ class Game:
 
     def _step_toward(self, candidates: list[tuple[int, int]]) -> tuple[int, int] | None:
         """在候选格中选曼哈顿距离玩家最近者（贪心追击）；平局取候选列表靠前者（确定性）。"""
+        return self._step_toward_point(candidates, (self.px, self.py))
+
+    def _step_toward_point(self, candidates: list[tuple[int, int]],
+                           goal: tuple[int, int],
+                           close_in: bool = False) -> tuple[int, int] | None:
+        """在候选格中选离 goal 最近的一步：先比曼哈顿距离，平局取候选靠前者（确定性，#2）。
+
+        close_in=True 时再加一道平局关键字「切比雪夫距离」——
+        只比曼哈顿会出现「原地打转」：怪在 (15,3)、玩家在 (13,4)，
+        向左与向下的曼哈顿距离都是 2，贪心会随方向顺序挑到向下那一步，
+        于是在两格之间来回横跳、永远贴不上来；切比雪夫更小的那一步才是真的在逼近。
+
+        只有 M7 的潜行分支需要 close_in（搜捕/回巢都要真的走拢）。
+        M3 的老追击路径保持原样：改它会改写 M1~M6 既有演示的行为，
+        而「不改写既有行为」优先于顺手修旧疾——该疾已登记为后续项。
+        """
         best = None
-        best_d = None
+        best_key = None
         for (x, y) in candidates:
-            d = abs(x - self.px) + abs(y - self.py)
-            if best_d is None or d < best_d:
-                best_d = d
+            manhattan = abs(x - goal[0]) + abs(y - goal[1])
+            if close_in:
+                key = (manhattan, max(abs(x - goal[0]), abs(y - goal[1])))
+            else:
+                key = (manhattan, 0)
+            if best_key is None or key < best_key:
+                best_key = key
                 best = (x, y)
         return best
+
+    # ---------- M7 怪物感知与潜行（倒挂突袭）----------
+    # 不变量 #9：感知是纯几何（`fov.monster_can_see`），不消耗 RandomSource ⇒ 不扰动随机序列；
+    #           「是否倒挂突袭」只由 Monster.alerted 决定，倍率是确定性常数、不额外掷骰。
+    # 设计要点（ADR-003）：感知只在世界回合**开始**时更新一次，
+    #          于是「玩家回合内从敌人视野外一步扑到面前」天然构成突袭窗口。
+    def update_awareness(self) -> None:
+        """世界回合开始时统一更新「谁发现了蜘蛛侠」（纯几何、零随机）。
+
+        只在潜行开启时有效；关闭时怪物恒为已察觉（M3 的全知追击，既有规格依赖它）。
+        """
+        if not self.stealth_enabled:
+            return
+        for m in self.monsters:
+            if m.alive and self.monster_can_see_player(m):
+                m.alert((self.px, self.py))
+
+    def monster_can_see_player(self, m: Monster) -> bool:
+        """怪物此刻能否看见玩家（#9：纯几何判定，不消耗 RandomSource）。
+
+        潜行关闭时这个几何结果不会去 gate AI——怪物 `alerted` 恒为 True，
+        行为仍是 M3 的全知追击；但查询本身照实回答「看不看得见」。
+        """
+        if not m.alive:
+            return False
+        return monster_can_see(self.grid, (m.x, m.y), (self.px, self.py),
+                               MONSTER_SIGHT_RADIUS, self.rooms)
+
+    def can_sneak_attack(self, monster: Monster) -> bool:
+        """能否对它发动倒挂突袭：潜行开启 + 它还没发现你（#9：不掷骰）。"""
+        return self.stealth_enabled and monster.alive and not monster.alerted
+
+    @property
+    def hidden(self) -> bool:
+        """潜行中：没有任何存活怪物发现你（潜行关闭时恒为 False）。"""
+        if not self.stealth_enabled:
+            return False
+        return not any(m.alive and m.alerted for m in self.monsters)
+
+    def alerted_monsters(self) -> list[Monster]:
+        """已发现玩家的存活怪物（潜行关闭时等于全部存活怪）。"""
+        return [m for m in self.monsters if m.alive and m.alerted]
+
+    def unaware_monsters(self) -> list[Monster]:
+        """还没发现玩家的存活怪物（潜行关闭时恒为空）。"""
+        return [m for m in self.monsters if m.alive and not m.alerted]
 
     # ---------- M4 道具与背包 ----------
     # 不变量 #1：掉落判定与掉落种类必须走 self.rng（RandomSource）；本模块不直接引入随机模块。
@@ -413,12 +634,14 @@ class Game:
     # 不变量 #7：楼层由 level.generate_level 保证连通，玩家起点可达全部可通行格。
     @classmethod
     def procedural(cls, rng: RandomSource, depth: int = 1,
-                   fov: bool = False) -> "Game":
+                   fov: bool = False, stealth: bool = False) -> "Game":
         """开一局程序化楼层：生成与撒点共用同一个 rng，先后固定（#1/#2）。
 
-        fov=True 时开启视野/迷雾（M6，默认关闭）。
+        fov=True 时开启视野/迷雾（M6，默认关闭）；
+        stealth=True 时开启怪物感知与潜行（M7，默认关闭）。
         """
-        return cls(rng=rng, level=generate_level(rng, depth=depth), fov=fov)
+        return cls(rng=rng, level=generate_level(rng, depth=depth),
+                   fov=fov, stealth=stealth)
 
     def load_level(self, level: Level, populate: bool = True) -> None:
         """装载一层程序化楼层：重置地形与实体，**保留**玩家 HP / 背包 / 伤害加成。
@@ -551,7 +774,8 @@ class Game:
                 view[it.y][it.x] = ITEM
         for m in self.monsters:
             if m.alive and self.in_bounds(m.x, m.y):
-                view[m.y][m.x] = MONSTER
+                # M7：未察觉的敌人画小写 m（可以从背后倒挂突袭）；潜行关闭时全是大写 M
+                view[m.y][m.x] = MONSTER if m.alerted else UNAWARE
         return "\n".join("".join(row) for row in view)
 
     def _render_fog(self) -> str:
@@ -582,9 +806,10 @@ class Game:
         for it in self.items:
             if self.in_bounds(it.x, it.y) and self.is_explored(it.x, it.y):
                 view[it.y][it.x] = ITEM
-        # 5) 怪物：只在**当前可见**时画（怪物会跑，记忆里的位置会骗人）
+        # 5) 怪物：只在**当前可见**时画（怪物会跑，记忆里的位置会骗人）；
+        #    M7：未察觉的画小写 m，已察觉的画 M
         for m in self.visible_monsters():
-            view[m.y][m.x] = MONSTER
+            view[m.y][m.x] = MONSTER if m.alerted else UNAWARE
         # 6) 玩家恒可见
         view[self.py][self.px] = PLAYER
         return "\n".join("".join(row) for row in view)

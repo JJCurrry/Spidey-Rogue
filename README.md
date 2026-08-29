@@ -33,6 +33,7 @@ python --version
 # 1) 玩一下（ASCII 渲染 + 程序化三层下潜 + 视野迷雾演示）
 python main.py
 python main.py --no-fog   # 切回「全图可见」，方便看整层结构
+python main.py --stealth  # 开启怪物视野与潜行（小写 m = 还没发现你的敌人）
 
 # 2) 跑 L1 墙四道门（每次改动前必跑）
 python scripts/gate.py
@@ -43,8 +44,9 @@ python scripts/review_pipeline.py
 
 预期：`main.py` 打印按 Seed 生成的三层纽约楼层（房间+走廊、自动撒怪撒道具），
 蜘蛛侠逐层清怪、走到楼梯下潜，HP 与背包跨层保留；开启视野时只看得见视线内区域，
-走进房间点亮整间，墙后的近处威胁以 `?`（蜘蛛感应）预警；
-`gate.py` 四道门 ALL GREEN（121 测试全绿）；`review_pipeline.py` 无 HIGH。
+走进房间点亮整间，墙后的近处威胁以 `?`（蜘蛛感应）预警；加 `--stealth` 后敌人只在
+看得见你时才会被惊动，从它看不见的地方荡过去就是「倒挂突袭」（伤害翻倍、不挨反击）；
+`gate.py` 四道门 ALL GREEN（168 测试全绿）；`review_pipeline.py` 无 HIGH。
 
 ---
 
@@ -57,7 +59,7 @@ python scripts/review_pipeline.py
 > 一个里程碑 = 一次提交；提交前更新接力文件（含本次 commit）。
 
 新会话读完 `CLAUDE.md + 最新工单 + 接力 HANDOFF-T001`，就知道：
-M1~M6 已经做完（M6 = 视野 / 渲染层），下一步该做 **M7 怪物视野与潜行 / 光照衰减 / 颜色高亮**。
+M1~M7 已经做完（M7 = 怪物视野与潜行），下一步该做 **M8 光照衰减 / 颜色高亮 / 噪音系统**。
 
 ---
 
@@ -71,7 +73,8 @@ M1~M6 已经做完（M6 = 视野 / 渲染层），下一步该做 **M7 怪物视
 | M4 ✅ | 道具 / 背包 | #5 背包容量上限、#6 HP 不超上限 |
 | M5 ✅ | 程序化关卡生成（房间+走廊、撒怪撒道具、下潜） | #1 生成随机走 Seed、#2 确定性、**#7 地图连通性** |
 | M6 ✅ | 视野 / 渲染层（迷雾 + 房间照明 + 蜘蛛感应） | #1 视野零随机、#2 确定性、**#8 渲染纯净性** |
-| M7 | 怪物视野与潜行 / 光照衰减 / 颜色高亮 | 待定 |
+| M7 ✅ | 怪物视野与潜行（感知 + 警觉状态机 + 倒挂突袭） | #1 感知零随机、#2 确定性、**#9 感知/潜行确定性** |
+| M8 | 光照衰减 / 颜色高亮 / 噪音系统 | 待定 |
 
 每完成一个里程碑：跑 `gate` 全绿 → 更新 `docs/接力/*.md`（含本次 commit）→ 提交。
 
@@ -102,28 +105,30 @@ roguelike-ai-coding/
 │   ├── review_pipeline.py        评审流水线 5 监理
 │   ├── hooks/pre-commit          提交瞬间调用 gate.py
 │   ├── gate.{sh,ps1}             本地/CI 共用入口
-│   └── .ratchet                  覆盖率棘轮基线（=121）
+│   └── .ratchet                  覆盖率棘轮基线（=168）
 ├── src/rogue/
 │   ├── __init__.py               暴露 Game / Monster / Item / Level / RandomSource
 │   ├── rng.py                    ★ 唯一 random 入口（RandomSource，Seed 注入）
-│   ├── tiles.py                  M5：格子字符常量（#/./@/M/!/> + M6 的空白/?）
+│   ├── tiles.py                  M5：格子字符常量（#/./@/M/!/> + M6 的空白/? + M7 的 m）
 │   ├── level.py                  M5：Room / Level / generate_level（房间+走廊 + 连通性兜底）
-│   ├── fov.py                    M6：视野几何（射线 / 半径 / 房间照明 / 蜘蛛感应）
-│   ├── game.py                   M1~M6：移动/战斗/AI/道具/装载楼层/下潜/视野渲染（不含随机）
+│   ├── fov.py                    M6 视野几何（射线/半径/房间照明/蜘蛛感应）+ M7 怪物感知几何
+│   ├── game.py                   M1~M7：移动/战斗/AI/道具/装载楼层/下潜/视野渲染/潜行（不含随机）
 │   └── __main__.py               python -m rogue
-├── tests/                        unittest 零依赖（共 121 例行为规格）
+├── tests/                        unittest 零依赖（共 168 例行为规格）
 │   ├── test_game.py              M1（7 例，跑在固定教学图上）
 │   ├── test_combat.py            M2（10 例）
 │   ├── test_ai.py                M3（11 例）
 │   ├── test_items.py             M4（23 例）
 │   ├── test_level.py             M5（28 例，含不变量 #7 的 30 seed 连通性判定）
-│   └── test_fov.py               M6（42 例，含不变量 #8 的渲染纯净性判定）
+│   ├── test_fov.py               M6（42 例，含不变量 #8 的渲染纯净性判定）
+│   └── test_stealth.py           M7（47 例，含不变量 #9 的感知/潜行确定性判定）
 └── docs/                         七件套
-    ├── 不变量.md                ⑤ 红线（#1 Seed 注入 … #8 渲染纯净性）
+    ├── 不变量.md                ⑤ 红线（#1 Seed 注入 … #9 感知/潜行确定性）
     ├── 术语表.md                ⑥ 只收望文生义会错的词
     ├── 地图.md                  ⑦ 架构地图
     ├── adr/ADR-001-技术选型.md  ④ 决策记录（技术选型）
     ├── adr/ADR-002-视野与渲染层.md  ④ 决策记录（M6 视野）
-    ├── 工单/T-001*.md           ② 一入一出 + 委托级别 + 验收分级（至 T-006）
+    ├── adr/ADR-003-怪物感知与潜行.md  ④ 决策记录（M7 潜行）
+    ├── 工单/T-001*.md           ② 一入一出 + 委托级别 + 验收分级（至 T-007）
     └── 接力/HANDOFF-T001.md     ③ 交接棒（含 commit + 下一步）
 ```

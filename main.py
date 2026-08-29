@@ -1,6 +1,8 @@
-"""终端 Roguelike 演示入口（M1 移动 + M2 战斗 + M3 怪物 AI + M4 道具背包 + M5 程序化关卡 + M6 视野）。
+"""终端 Roguelike 演示入口（M1 移动 + M2 战斗 + M3 怪物 AI + M4 道具背包 + M5 程序化关卡
++ M6 视野 + M7 怪物感知与潜行）。
 
-主题：MCU 荷兰弟（Tom Holland）版蜘蛛侠。运行：python main.py（--no-fog 切回全图）
+主题：MCU 荷兰弟（Tom Holland）版蜘蛛侠。
+运行：python main.py（--no-fog 切回全图；--stealth 开启怪物视野与潜行）
 
 演示流程：按 seed 程序化生成楼层 → 蜘蛛侠逐层清怪 → 走楼梯下潜（共 MAX_DEPTH 层）。
 随机只从 src/rogue/rng.py 流出（不变量 #1）；本文件不含任何随机调用。
@@ -9,6 +11,10 @@ M6：默认开启视野/迷雾——蜘蛛侠只看得见视线内的区域，�
 走过的地方留下记忆，墙后的近处威胁靠「蜘蛛感应」以 `?` 提示。
 注意：演示用的寻路 AI 仍然知道全图（它是演示脚本不是玩家），
 视野只影响**渲染**，不影响任何游戏状态（不变量 #8）。
+
+M7：`--stealth` 开启怪物感知与潜行——敌人只在看得见你时才会被惊动，
+还没发现你的敌人画成小写 `m`；从它看不见的地方荡过去即可**倒挂突袭**
+（伤害翻倍、敌人来不及反击）。默认关闭 ⇒ 不加参数时演示与 M6 完全一致。
 """
 from __future__ import annotations
 import os
@@ -26,8 +32,8 @@ TURNS_PER_LEVEL = 80     # 单层回合上限（防死循环）
 MAP_EVERY = 15           # 每几回合补印一次地图，避免刷屏
 MOVE_LOG_EVERY = 4       # 纯走位每几步报一次，避免刷屏
 
-LEGEND = ("图例：@ 蜘蛛侠 | M 视野内的敌人 | ? 蜘蛛感应（看不见的威胁） | "
-          "! 补给 | > 下行楼梯 | # 墙 | . 地板 | 空白 未探索")
+LEGEND = ("图例：@ 蜘蛛侠 | M 已察觉你的敌人 | m 未察觉的敌人（可倒挂突袭） | "
+          "? 蜘蛛感应（看不见的威胁） | ! 补给 | > 下行楼梯 | # 墙 | . 地板 | 空白 未探索")
 
 DIRS = ((0, -1), (0, 1), (-1, 0), (1, 0))
 
@@ -123,6 +129,28 @@ def _nearest_monster(game: Game):
     return min(alive, key=lambda m: abs(m.x - game.px) + abs(m.y - game.py))
 
 
+def _target_monster(game: Game):
+    """本回合要招呼谁：潜行开启时优先「还没发现你」的那只（摸哨优先于硬拼）。"""
+    target = _nearest_monster(game)
+    if not game.stealth_enabled or target is None:
+        return target
+    unaware = game.unaware_monsters()
+    if not unaware:
+        return target
+    return min(unaware, key=lambda m: (abs(m.x - game.px) + abs(m.y - game.py),
+                                       m.x, m.y))
+
+
+def _stealth_str(game: Game) -> str:
+    """状态栏的潜行提示（潜行关闭时不显示）。"""
+    if not game.stealth_enabled:
+        return ""
+    unaware = len(game.unaware_monsters())
+    if game.hidden:
+        return " | 潜行中：还没有人发现你"
+    return f" | 已被 {len(game.alerted_monsters())} 只敌人发现（{unaware} 只尚未察觉）"
+
+
 def _find_in_bag(game: Game, key: str) -> int:
     """返回背包中该道具的下标；没有则返回 -1。"""
     for i, it in enumerate(game.inventory):
@@ -155,7 +183,7 @@ def _player_act(game: Game) -> str:
         if it is not None:
             return f"拾取 {it.name}"
 
-    target = _nearest_monster(game)
+    target = _target_monster(game)
 
     # 4) 被多只怪相邻围住 → 先后撤（M2 规则是「攻击必吃反击」，硬拼会被围殴致死）
     if len(_adjacent_monsters(game)) >= 2:
@@ -164,14 +192,22 @@ def _player_act(game: Game) -> str:
             return "被围住了，后撤拉开距离"
 
     # 5) 有敌人：相邻就打（M2）——优先补刀血量最低的那只，少挨一次反击；
-    #    不相邻就远程消耗或逼近（M4）
+    #    不相邻就远程消耗或逼近（M4）；潜行开启时还能直接荡过去倒挂突袭（M7）
     if target is not None:
         adj = _adjacent_monsters(game)
         if adj:
             victim = min(adj, key=lambda m: (m.hp, m.x, m.y))
             dmg, dead = game.player_attack(victim)
-            return (f"蛛网拳命中 {victim.name}，造成 {dmg} 点伤害"
+            verb = "倒挂突袭" if game.last_attack_sneak else "蛛网拳命中"
+            return (f"{verb} {victim.name}，造成 {dmg} 点伤害"
                     + ("（倒下！）" if dead else ""))
+        if game.stealth_enabled and not target.alerted:
+            # 它还没发现你 ⇒ 射出蛛丝荡过去，落地就是一记背身突袭
+            strike = game.web_strike(target)
+            if strike is not None:
+                dmg, dead = strike
+                return (f"蛛丝摆荡，倒挂突袭 {target.name}，造成 {dmg} 点伤害"
+                        + ("（一击放倒！）" if dead else ""))
         dist = abs(target.x - game.px) + abs(target.y - game.py)
         if dist <= WEB_SHOT_RANGE:
             idx = _find_in_bag(game, "web_cartridge")
@@ -216,12 +252,16 @@ def _is_move(action: str) -> bool:
 
 
 def main() -> None:
-    fog = "--no-fog" not in sys.argv[1:]   # M6：默认开视野迷雾
+    args = sys.argv[1:]
+    fog = "--no-fog" not in args           # M6：默认开视野迷雾
+    stealth = "--stealth" in args          # M7：潜行默认关闭
     rng = RandomSource(seed=SEED)
-    game = Game.procedural(rng, depth=1, fov=fog)
+    game = Game.procedural(rng, depth=1, fov=fog, stealth=stealth)
     print(f"=== 第 {game.depth} 层「{game.level_name}」（seed={SEED}）===")
     if fog:
         print(LEGEND)
+    if stealth:
+        print("潜行模式：还没发现你的敌人是小写 m —— 从它看不见的地方荡过去，一击放倒。")
     print(game.render())
     print(f"玩家 HP: {game.player_hp}/{game.player_max_hp} | 背包: {_bag_str(game)}")
 
@@ -244,7 +284,8 @@ def main() -> None:
             print(f"\n-- 第 {turn} 回合（第 {game.depth} 层）-- {action}")
             print(f"   HP: {game.player_hp}/{game.player_max_hp}"
                   + (f" | 存活敌人: {len(alive)}" if alive else " | 本层已清场")
-                  + f" | 背包: {_bag_str(game)}（{len(game.inventory)}/5）")
+                  + f" | 背包: {_bag_str(game)}（{len(game.inventory)}/5）"
+                  + _stealth_str(game))
 
         if game.depth != shown_depth:
             shown_depth = game.depth
