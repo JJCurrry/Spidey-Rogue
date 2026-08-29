@@ -28,6 +28,11 @@ M9：`--noise` 下蜘蛛侠脚边会多一个**皇后区垃圾桶盖**——抄�
 （响 9，全场最响），把听得见的敌人全引到**落点**去。这是 M8「调虎离山」的主动版：
 被动版只能靠「蛛网弹缠住一只怪、它挣扎着把同伴引过去」，而那已经先动手了。
 默认（不加 --noise）既不会刷出垃圾盖、也甩不响 ⇒ 与 M8 逐字节一致。
+
+M11：`--light` 开启光照衰减——房间有灯、走廊与死角昏暗，地图按光照给出明暗梯度；
+暗处的敌人视野缩短（全黑只看 2 格、昏暗看 4 格、明亮看 7 格）。这层玩法只缩短怪物感知半径，
+不改变 render 的字形 ⇒ 不加 `--light` 时演示与 M10 逐字节一致。
+要让「近视眼哨兵」真正帮到你摸哨，请配合 `--stealth`（暗处的怪在更远的距离上才发现不了你）。
 """
 from __future__ import annotations
 import os
@@ -310,10 +315,17 @@ def _is_move(action: str) -> bool:
                               "被挡住了"))
 
 
+def _colored(game: Game, color_on: bool) -> str:
+    """按当前光照场给地图上底色（M10 上色 + M11 明暗梯度；纯展示层，不改字形）。"""
+    light = game.light_field if game.light_enabled else None
+    return colorize(game.render(), color_on, light=light, width=game.width)
+
+
 def main() -> None:
     args = sys.argv[1:]
     fog = "--no-fog" not in args           # M6：默认开视野迷雾
     noise = "--noise" in args              # M8：听觉默认关闭
+    light = "--light" in args              # M11：光照衰减默认关闭
     # 听觉只在「怪物要被发现才追你」时才有意义 ⇒ --noise 隐含 --stealth
     stealth = "--stealth" in args or noise
     # M10：终端上色（纯展示层，不改字形/状态）。默认 TTY 自动开，可用 --no-color / --color 强制。
@@ -324,7 +336,8 @@ def main() -> None:
     else:
         color_on = should_color()
     rng = RandomSource(seed=SEED)
-    game = Game.procedural(rng, depth=1, fov=fog, stealth=stealth, noise=noise)
+    game = Game.procedural(rng, depth=1, fov=fog, stealth=stealth,
+                           noise=noise, light=light)
     print(f"=== 第 {game.depth} 层「{game.level_name}」（seed={SEED}）===")
     if fog:
         print(LEGEND)
@@ -333,7 +346,10 @@ def main() -> None:
     if noise:
         print("听觉模式：走路无声，但动作会响——蛛网拳（6）、被蛛网弹缠住的怪挣扎（7，"
               "声源在它自己那儿）、下潜落地（8）；倒挂突袭只有 2，几乎无声。听见动静的敌人画 ~。")
-    print(colorize(game.render(), color_on))
+    if light:
+        print("光照模式：房间有灯、走廊昏暗——暗处的敌人视野缩短（全黑 2 格 / 昏暗 4 格 / 明亮 7 格）；"
+              "配合 --stealth 才能摸到暗处的哨兵。")
+    print(_colored(game, color_on))
     print(f"玩家 HP: {game.player_hp}/{game.player_max_hp} | 背包: {_bag_str(game)}")
 
     shown_depth = game.depth
@@ -362,9 +378,9 @@ def main() -> None:
             shown_depth = game.depth
             level_turn = 0
             print(f"\n=== 下潜到第 {game.depth} 层「{game.level_name}」===")
-            print(colorize(game.render(), color_on))
+            print(_colored(game, color_on))
         elif level_turn % MAP_EVERY == 0:
-            print(colorize(game.render(), color_on))
+            print(_colored(game, color_on))
 
         if game.player_dead:
             print("\n蜘蛛侠被击倒了……（演示结束）")

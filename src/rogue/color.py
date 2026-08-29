@@ -15,7 +15,12 @@ from __future__ import annotations
 import os
 import sys
 
+from .tiles import FLOOR, UNSEEN
+from .light import (LIGHT_LEVEL_DARK, LIGHT_LEVEL_DIM, LIGHT_LEVEL_LIT)
+
 RESET = "\033[0m"  # 每个着色字形后复位，避免颜色串到后面的字符
+DIM = "\033[2m"          # 昏暗：略压暗（明暗梯度的中间档）
+DARK = "\033[90m"        # 全黑：暗灰（明暗梯度的最暗档；与墙同色系但更闷）
 
 # 字形 → ANSI 转义前缀（开色）。
 # 调色板在浅色 / 深色背景都尽量可读：
@@ -40,22 +45,52 @@ GLYPH_COLORS: dict[str, str] = {
 }
 
 
-def colorize(text: str, enabled: bool = True) -> str:
-    """把多行地图文本按字形上色。
+def colorize(text: str, enabled: bool = True, light: dict | None = None,
+              width: int | None = None) -> str:
+    """把多行地图文本按字形上色（M10 纯展示层；M11 明暗梯度）。
 
     - enabled=False ⇒ 原样返回（管道 / 重定向 / NO_COLOR 环境下降级为纯文本）。
     - 只包裹「已知字形」；空格、换行、未知字符原样透传 ⇒ **剥离转义码后 == 原文本**。
     - 纯函数、零随机、确定性：同输入 ⇒ 同输出。
+    - light 为可选的光照场 `{坐标: 等级}`（M11）：给定时，地形（地板 / 未探索）
+      按光照等级压暗，营造明暗梯度；实体字形（@ M m ~ ? ! > #）保持原色不变。
+      light=None 或 width=None ⇒ 退化为不含光照梯度的旧行为（向后兼容，render 字形一字不差）。
     """
     if not enabled:
         return text
-    out: list[str] = []
+    if light is None or width is None:
+        out: list[str] = []
+        for ch in text:
+            code = GLYPH_COLORS.get(ch)
+            if code is None:
+                out.append(ch)
+            else:
+                out.append(code + ch + RESET)
+        return "".join(out)
+    # ---- 带光照梯度的上色：逐字追踪 (x, y) 以查光照等级 ----
+    out = []
+    x = 0
+    y = 0
     for ch in text:
-        code = GLYPH_COLORS.get(ch)
-        if code is None:
+        if ch == "\n":
             out.append(ch)
+            x = 0
+            y += 1
+            continue
+        code = GLYPH_COLORS.get(ch)
+        if code is not None:
+            out.append(code + ch + RESET)          # 实体字形：颜色不变
+        elif ch in (FLOOR, UNSEEN, " "):
+            lvl = light.get((x, y), LIGHT_LEVEL_LIT)
+            if lvl == LIGHT_LEVEL_DARK:
+                out.append(DARK + ch + RESET)       # 全黑：暗灰
+            elif lvl == LIGHT_LEVEL_DIM:
+                out.append(DIM + ch + RESET)        # 昏暗：略压暗
+            else:
+                out.append(ch)                      # 明亮：保持默认色
         else:
-            out.append(code + ch + RESET)
+            out.append(ch)
+        x += 1
     return "".join(out)
 
 
