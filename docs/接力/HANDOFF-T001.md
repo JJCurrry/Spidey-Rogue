@@ -8,9 +8,9 @@
 > 只有当项目出现并行推进的两条线时，才需要另开一根棒（如 `HANDOFF-<分支名>`）。
 
 ## 当前状态
-- 整体进度：M1 已完成（治理脚手架 + 格子移动）；M2 已完成（战斗系统）；M3 已完成（怪物 AI）；M4 已完成（道具与背包）；M5 已完成（程序化关卡）；M6 已完成（视野 / 渲染层）；M7 已完成（怪物视野与潜行）；**M8 已完成（噪音与听觉）**。
+- 整体进度：M1 已完成（治理脚手架 + 格子移动）；M2 已完成（战斗系统）；M3 已完成（怪物 AI）；M4 已完成（道具与背包）；M5 已完成（程序化关卡）；M6 已完成（视野 / 渲染层）；M7 已完成（怪物视野与潜行）；M8 已完成（噪音与听觉）；**M9 已完成（主动制造响动 / 皇后区垃圾桶盖）**。
 - **产品目标（2026-08-29 新增，已明确为 MCU 荷兰弟版）**：最新蜘蛛侠（Spider-Man）风格，**以 MCU 荷兰弟（Tom Holland）版蜘蛛侠为主角**——红蓝战衣/蛛网发射器/纽约都市基调；所有里程碑的美术/剧情/机制均围绕此主题（非官方 IP，属风格致敬/个人学习项目）。
-- 最近一次更新：2026-08-29（M8 完成）
+- 最近一次更新：2026-08-29（M9 完成）
 
 ## 已完成（含 commit）
 - [x] 治理脚手架（七件套 + 流水线 seed-guard）— commit `fdfaa30716477ab5c7b7e6435b5ee716a4d8b402`
@@ -29,8 +29,9 @@
 - [x] M7 怪物视野与潜行：`fov.py` 增 `MONSTER_SIGHT_RADIUS=7` 与 `monster_can_see`（**双向** Bresenham 视线 + 同房间互通，纯几何、零随机）；`tiles.py` 增 `UNAWARE="m"`；`Monster` 增警觉状态机（`alerted` / `alert_turns` / `last_seen` / `home` + `alert()` / `calm()`）；`Game` 增 `stealth` 开关（**默认关闭**）、`update_awareness` / `monster_can_see_player` / `can_sneak_attack` / `web_strike` / `_strike_path` / `hidden` / `alerted_monsters` / `unaware_monsters`；`player_attack` 在未察觉时触发**倒挂突袭**（伤害 × `SNEAK_ATTACK_MULT=2`、不挨反击、命中后转已察觉）；未察觉的 `chase` 怪**回巢**、`wander` 怪照旧游荡；渲染区分 `m`（未察觉）/ `M`（已察觉）；新增不变量 **#9 感知/潜行确定性**；`tests/test_stealth.py`（47 例），用例数 121→168，门禁四道门 + 评审流水线全绿；`main.py` 增 `--stealth`（默认关闭），实证 `python main.py` 与 M6 逐字节一致（仅图例一行因新增 `m` 而变） — commit `9ce33f3`
 
 - [x] M8 噪音与听觉：新增 `src/rogue/sound.py`（`noise_field` 在 grid 上跑 Dijkstra——空地 1 / 墙 3、声源 0、超响度不入場、**越界不传播**；`noise_cost` / `noise_reaches` / `step_cost`，**纯几何零随机**）；`tiles.py` 增 `HEARD="~"`；`Monster` 增 `alert_cause`（`sight` / `sound` / `None`，`alert(pos, cause=)` 记录、`calm()` 清空）；`Game` 增 `noise` 开关（**默认关闭**）、`emit_noise` / `monsters_hearing` / `can_hear` / `heard_monsters` / `_monster_glyph`；四个声源接入点：蛛网拳 `NOISE_PUNCH=6`（玩家处）、倒挂突袭 `NOISE_SNEAK=2`（玩家处）、蛛网弹命中 `NOISE_STRUGGLE=7`（**被缠住的怪处**）、下潜落地 `NOISE_LANDING=8`（只在 `descend()`，不在 `load_level`）；走路/拾取/吃三明治/注射纳米强化剂**无声**；声源未必是玩家 ⇒ **调虎离山**成立；视听同时以视觉为准；新增不变量 **#10 噪音/听觉确定性**；新增 ADR-004；`tests/test_noise.py`（47 例），用例数 168→215，门禁四道门 + 评审流水线全绿；`main.py` 增 `--noise`（隐含 `--stealth`），实证 `python main.py` 与 `python main.py --stealth` 与 M7 **玩法日志逐字节一致**（唯一差异是图例那一行多了 `~`） — commit `54a173d`
+- [x] M9 主动制造响动：皇后区垃圾桶盖（诱饵道具）+ 投掷几何（`can_throw` / `throw_decoy`，纯几何零随机）+ 主动调虎离山；`use_item` 增 `target` 参数（诱饵专用，其余三件道具向后兼容）；诱饵只在 `noise` 开关下、开局脚边供给、不进 `ITEM_KEYS` 掉落池（零随机扰动）；`spawn_item` 在玩家脚下格允许「换掉脚下物」（仍保持一格一物 #5）；新增不变量 **#11 主动制造响动 / 投掷确定性**；ADR-005；`tests/test_decoy.py`（30 例），用例数 215→245，门禁四道门 + 评审流水线全绿；默认/潜行两条演示与 M8 逐字节一致、`--noise` 演示主动调虎离山（seed 19 下甩盖 3 次、引开 5/4 只敌人） — commit `f5eb8a9`
 
-## 下一步指令（给下一个会话 / M9）
+## 下一步指令（给下一个会话 / M10）
 0. 已完成的 M7 关键结论（**先读，能省半天**）：
    - **整数 Bresenham 不对称**：(1,1)→(3,2) 途经 (2,1)，(3,2)→(1,1) 途经 (2,2)。
      所以怪物感知必须**双向**判视线，否则会出现「隔着拐角看得见你、你却看不见它」的幽灵猎手。
@@ -43,7 +44,7 @@
    - **M3 的老追击有「原地打转」旧疾**：`_step_toward` 只比曼哈顿距离，平局时可能永远贴不上来。
      M7 的潜行分支已用切比雪夫二次关键字修正；**老路径刻意没改**——改了会改写 M6 既有演示行为。
      若要修，请单独开单并重新基线化 `python main.py` 的输出。
-1. 读 `CLAUDE.md` → 拉 `docs/工单/T-009*`（光照衰减 / ANSI 颜色高亮 / 主动制造响动）或新建。
+1. 读 `CLAUDE.md` → 拉 `docs/工单/T-010*`（光照衰减 / ANSI 颜色高亮）或新建。
 2. 若要动渲染：**默认路径必须是「不改既有规格」的那条**——M6 的教训是「新能力默认 opt-in」
    （`fov=False` 走 `_render_full`，`fov=True` 才走 `_render_fog`）。加 ANSI 颜色也一样：
    默认着色必须保证 `test_game/test_items/test_level` 里 `assertIn("@"/"!"/">", render())`
