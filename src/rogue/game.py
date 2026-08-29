@@ -1,4 +1,4 @@
-"""M1~M5：格子地图 + 玩家移动 + 战斗系统 + 怪物 AI + 道具背包 + 程序化关卡（蜘蛛侠 MCU 荷兰弟版主题）。
+"""M1~M6：格子地图 + 玩家移动 + 战斗系统 + 怪物 AI + 道具背包 + 程序化关卡 + 视野渲染（蜘蛛侠 MCU 荷兰弟版主题）。
 
 注意（不变量 #1）：随机经 RandomSource 注入；本模块不直接引入随机模块。
 注意（GB-1 边界地雷）：不可走出边界、不可走入墙、不可走入怪物。
@@ -6,12 +6,15 @@
 注意（不变量 #5）：背包容量有上限，满包时拾取失败且道具留在地面。
 注意（不变量 #6）：治疗类效果不得让 HP 超过上限，由 _heal_player 的 min(...) 钳制。
 注意（不变量 #7）：程序化楼层中玩家起点可达全部可通行格（生成期保证 + 洪泛兜底）。
+注意（不变量 #8）：render() 只依赖地形 + 实体 + 玩家位置，不改写任何游戏状态
+                  （唯一例外：开启视野时「已探索记忆」集合单调增长）。
 """
 from __future__ import annotations
 from typing import NamedTuple
 from .rng import RandomSource
-from .tiles import WALL, FLOOR, PLAYER, MONSTER, ITEM, STAIRS
+from .tiles import WALL, FLOOR, PLAYER, MONSTER, ITEM, STAIRS, UNSEEN, SENSE
 from .level import Level, Room, generate_level, TUTORIAL_LEVEL_NAME
+from .fov import (SIGHT_RADIUS, SPIDER_SENSE_RADIUS, visible_tiles, in_spider_sense)
 
 # M1 采用固定小房间（程序化生成见 M5 的 level.py；默认仍是这张教学图）
 _MAP = [
@@ -122,12 +125,18 @@ class Monster:
 
 class Game:
     def __init__(self, rng: RandomSource | None = None, level: Level | None = None,
-                 populate: bool = True) -> None:
+                 populate: bool = True, fov: bool = False) -> None:
         """rng 为注入的随机源；level 为 None 时用 M1 的固定教学图，否则装载程序化楼层。
 
         populate 控制装载时是否自动撒怪与补给（测试生成期结构时可关掉）。
+        fov 控制是否开启视野/迷雾（M6，默认关闭 ⇒ render() 仍是全图，
+        保证 M1~M5 的既有规格不被打破；显式传入 True 才走迷雾渲染）。
         """
         self.rng = rng or RandomSource(0)
+        # M6 视野状态：fov_enabled 是渲染开关，visible/explored 是它的产物
+        self.fov_enabled = fov
+        self.visible: set[tuple[int, int]] = set()
+        self.explored: set[tuple[int, int]] = set()
         # M2 玩家状态（跨层保留：HP / 背包 / 纳米加成）
         self.player_max_hp = PLAYER_MAX_HP
         self.player_hp = PLAYER_MAX_HP
@@ -145,6 +154,7 @@ class Game:
             self.height = len(self.grid)
             self.width = len(self.grid[0])
             self.px, self.py = self._find_player()
+            self.update_fov()
         else:
             self.load_level(level, populate=populate)
 
@@ -178,6 +188,7 @@ class Game:
         self.grid[self.py][self.px] = FLOOR
         self.px, self.py = nx, ny
         self.grid[self.py][self.px] = PLAYER
+        self.update_fov()  # M6：可见区域随移动更新（不变量 #8：只写视野状态）
         return True
 
     # ---------- M2 怪物 / 战斗 ----------
@@ -401,12 +412,20 @@ class Game:
     # 不变量 #2：先生成地形、再按固定房间顺序撒点 ⇒ 同 seed + 同 depth ⇒ 同楼层。
     # 不变量 #7：楼层由 level.generate_level 保证连通，玩家起点可达全部可通行格。
     @classmethod
-    def procedural(cls, rng: RandomSource, depth: int = 1) -> "Game":
-        """开一局程序化楼层：生成与撒点共用同一个 rng，先后固定（#1/#2）。"""
-        return cls(rng=rng, level=generate_level(rng, depth=depth))
+    def procedural(cls, rng: RandomSource, depth: int = 1,
+                   fov: bool = False) -> "Game":
+        """开一局程序化楼层：生成与撒点共用同一个 rng，先后固定（#1/#2）。
+
+        fov=True 时开启视野/迷雾（M6，默认关闭）。
+        """
+        return cls(rng=rng, level=generate_level(rng, depth=depth), fov=fov)
 
     def load_level(self, level: Level, populate: bool = True) -> None:
-        """装载一层程序化楼层：重置地形与实体，**保留**玩家 HP / 背包 / 伤害加成。"""
+        """装载一层程序化楼层：重置地形与实体，**保留**玩家 HP / 背包 / 伤害加成。
+
+        M6：新楼层 = 新地图 ⇒ 清空上一层的「已探索记忆」（记忆跟着地图走，不跨层）。
+        """
+        self.explored = set()  # 换层即失忆：上一层的地形记忆对新楼层无意义
         self.grid = [list(row) for row in level.grid]
         self.height = level.height
         self.width = level.width
@@ -418,6 +437,7 @@ class Game:
         self.grid[self.py][self.px] = PLAYER
         self.monsters = []
         self.items = []
+        self.update_fov()  # M6：装载后立刻算一次可见区域
         if populate:
             self._populate_level()
 
@@ -478,8 +498,47 @@ class Game:
         self.load_level(generate_level(self.rng, depth=self.depth + 1))
         return True
 
+    # ---------- M6 视野 / 渲染层（蜘蛛感应）----------
+    # 不变量 #1：视野是纯几何计算，不消耗 RandomSource ⇒ 不扰动战斗/掉落/生成序列。
+    # 不变量 #2：视野只依赖 grid + 玩家位置 + rooms ⇒ 同状态 ⇒ 同可见集合。
+    # 不变量 #8：这里的函数只写 self.visible / self.explored，不碰 grid 与任何实体。
+    def update_fov(self) -> set[tuple[int, int]]:
+        """重算可见格，并把它们并入「已探索记忆」（记忆只增不减）。
+
+        幂等：同样的状态算几次结果都一样（#2/#8）。
+        """
+        self.visible = visible_tiles(self.grid, (self.px, self.py),
+                                     SIGHT_RADIUS, self.rooms)
+        self.explored |= self.visible
+        return self.visible
+
+    def is_visible(self, x: int, y: int) -> bool:
+        return (x, y) in self.visible
+
+    def is_explored(self, x: int, y: int) -> bool:
+        return (x, y) in self.explored
+
+    def visible_monsters(self) -> list[Monster]:
+        """当前看得见的存活怪物（视野内的敌人才画成 M）。"""
+        return [m for m in self.monsters
+                if m.alive and self.is_visible(m.x, m.y)]
+
+    def spider_sense(self) -> list[Monster]:
+        """蜘蛛感应：半径内（穿墙）能感到轮廓的存活怪物，含已经看得见的。
+
+        半径 SPIDER_SENSE_RADIUS 刻意小于视野半径 SIGHT_RADIUS——是预警不是透视。
+        """
+        return [m for m in self.monsters
+                if m.alive and in_spider_sense((self.px, self.py), (m.x, m.y))]
+
     # ---------- 渲染 ----------
     def render(self) -> str:
+        if self.fov_enabled:
+            return self._render_fog()
+        return self._render_full()
+
+    def _render_full(self) -> str:
+        """M1~M5 的全图渲染（视野关闭时的路径，既有规格都跑在这条上）。"""
         view = [list(row) for row in self.grid]
         # M5：楼梯画在空地板上（优先级最低，道具/怪物/玩家依次覆盖）
         if self.stairs is not None and self.in_bounds(*self.stairs):
@@ -493,4 +552,39 @@ class Game:
         for m in self.monsters:
             if m.alive and self.in_bounds(m.x, m.y):
                 view[m.y][m.x] = MONSTER
+        return "\n".join("".join(row) for row in view)
+
+    def _render_fog(self) -> str:
+        """M6 迷雾渲染：未探索=空白，走过的地方留记忆，看不见的近处威胁画 `?`。
+
+        渲染优先级（后者覆盖前者）：
+          蜘蛛感应 `?` < 楼梯 `>` < 道具 `!` < 怪物 `M` < 玩家 `@`
+        （沿用 M5 的 楼梯 < 道具 < 怪物 < 玩家）
+        """
+        self.update_fov()  # 幂等；怪物移动后进视野也能立刻显示（#8：只写视野状态）
+
+        view = [[UNSEEN] * self.width for _ in range(self.height)]
+        # 1) 地形记忆：探索过的格子照实画（玩家脚下的 '@' 归位到玩家层再画）
+        for (x, y) in self.explored:
+            if not self.in_bounds(x, y):
+                continue
+            ch = self.grid[y][x]
+            view[y][x] = FLOOR if ch == PLAYER else ch
+        # 2) 蜘蛛感应：看不见、但感得到的威胁轮廓（穿墙，半径 4）
+        for m in self.spider_sense():
+            if self.in_bounds(m.x, m.y) and not self.is_visible(m.x, m.y):
+                view[m.y][m.x] = SENSE
+        # 3) 楼梯 / 4) 道具：不动的东西，看见过就留在记忆里
+        if self.stairs is not None and self.in_bounds(*self.stairs):
+            sx, sy = self.stairs
+            if self.is_explored(sx, sy):
+                view[sy][sx] = STAIRS
+        for it in self.items:
+            if self.in_bounds(it.x, it.y) and self.is_explored(it.x, it.y):
+                view[it.y][it.x] = ITEM
+        # 5) 怪物：只在**当前可见**时画（怪物会跑，记忆里的位置会骗人）
+        for m in self.visible_monsters():
+            view[m.y][m.x] = MONSTER
+        # 6) 玩家恒可见
+        view[self.py][self.px] = PLAYER
         return "\n".join("".join(row) for row in view)

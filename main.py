@@ -1,9 +1,14 @@
-"""终端 Roguelike 演示入口（M1 移动 + M2 战斗 + M3 怪物 AI + M4 道具背包 + M5 程序化关卡）。
+"""终端 Roguelike 演示入口（M1 移动 + M2 战斗 + M3 怪物 AI + M4 道具背包 + M5 程序化关卡 + M6 视野）。
 
-主题：MCU 荷兰弟（Tom Holland）版蜘蛛侠。运行：python main.py
+主题：MCU 荷兰弟（Tom Holland）版蜘蛛侠。运行：python main.py（--no-fog 切回全图）
 
 演示流程：按 seed 程序化生成楼层 → 蜘蛛侠逐层清怪 → 走楼梯下潜（共 MAX_DEPTH 层）。
 随机只从 src/rogue/rng.py 流出（不变量 #1）；本文件不含任何随机调用。
+
+M6：默认开启视野/迷雾——蜘蛛侠只看得见视线内的区域，走进房间点亮整间，
+走过的地方留下记忆，墙后的近处威胁靠「蜘蛛感应」以 `?` 提示。
+注意：演示用的寻路 AI 仍然知道全图（它是演示脚本不是玩家），
+视野只影响**渲染**，不影响任何游戏状态（不变量 #8）。
 """
 from __future__ import annotations
 import os
@@ -20,6 +25,9 @@ MAX_DEPTH = 3            # 演示下潜到第几层收工
 TURNS_PER_LEVEL = 80     # 单层回合上限（防死循环）
 MAP_EVERY = 15           # 每几回合补印一次地图，避免刷屏
 MOVE_LOG_EVERY = 4       # 纯走位每几步报一次，避免刷屏
+
+LEGEND = ("图例：@ 蜘蛛侠 | M 视野内的敌人 | ? 蜘蛛感应（看不见的威胁） | "
+          "! 补给 | > 下行楼梯 | # 墙 | . 地板 | 空白 未探索")
 
 DIRS = ((0, -1), (0, 1), (-1, 0), (1, 0))
 
@@ -208,9 +216,12 @@ def _is_move(action: str) -> bool:
 
 
 def main() -> None:
+    fog = "--no-fog" not in sys.argv[1:]   # M6：默认开视野迷雾
     rng = RandomSource(seed=SEED)
-    game = Game.procedural(rng, depth=1)
+    game = Game.procedural(rng, depth=1, fov=fog)
     print(f"=== 第 {game.depth} 层「{game.level_name}」（seed={SEED}）===")
+    if fog:
+        print(LEGEND)
     print(game.render())
     print(f"玩家 HP: {game.player_hp}/{game.player_max_hp} | 背包: {_bag_str(game)}")
 
