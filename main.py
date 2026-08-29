@@ -4,6 +4,7 @@
 主题：MCU 荷兰弟（Tom Holland）版蜘蛛侠。
 运行：python main.py（--no-fog 切回全图；--stealth 开启怪物视野与潜行；--noise 再开启听觉，
       --noise 隐含 --stealth——听觉只在「怪物需要被发现才追你」时才有意义；
+      --light 开启光照衰减；--flashlight 装备随身手电（隐含 --light）；
       --color / --no-color 控制终端上色，默认在终端（TTY）自动上色、管道/重定向下自动降级为纯文本）
 
 演示流程：按 seed 程序化生成楼层 → 蜘蛛侠逐层清怪 → 走楼梯下潜（共 MAX_DEPTH 层）。
@@ -33,6 +34,11 @@ M11：`--light` 开启光照衰减——房间有灯、走廊与死角昏暗，�
 暗处的敌人视野缩短（全黑只看 2 格、昏暗看 4 格、明亮看 7 格）。这层玩法只缩短怪物感知半径，
 不改变 render 的字形 ⇒ 不加 `--light` 时演示与 M10 逐字节一致。
 要让「近视眼哨兵」真正帮到你摸哨，请配合 `--stealth`（暗处的怪在更远的距离上才发现不了你）。
+
+M12：`--flashlight` 装备随身手电（蛛网发射器探照灯，隐含 --light）——玩家处多一个可开关的
+动态光源：开灯照亮四周（半径比随身微光更远，同时让你在暗处的怪眼里更易被察觉），
+关灯则退回微光、摸黑潜行更稳。手电默认不装备 ⇒ 不加 `--flashlight` 时演示与 M11 逐字节一致。
+演示里蜘蛛侠的开关策略：潜行且还没人发现你 → 关灯摸黑；一旦有人盯上 → 开灯照亮战场。
 """
 from __future__ import annotations
 import os
@@ -219,6 +225,15 @@ def _decoy_spot(game: Game):
 
 def _player_act(game: Game) -> str:
     """蜘蛛侠一回合的决策：强化 → 补血 → 拾取 → 被围则后撤 → 蛛网拳 → 蛛网弹/逼近 → 搜刮 → 下楼。"""
+    # 0) M12 随身手电：潜行摸黑、交手点亮（纯状态切换，不消耗随机；只有 flashlight 装备了才管）
+    if game.flashlight_enabled:
+        # 还没人发现你（潜行且 hidden）时关灯更稳；一旦被盯上就开灯照亮战场
+        want_on = not (game.stealth_enabled and game.hidden)
+        if game.flashlight_on != want_on:
+            game.toggle_flashlight()
+            return ("打开蛛网探照灯，照亮战场" if want_on
+                    else "关掉蛛网探照灯，摸黑潜行")
+
     # 1) 纳米强化剂：永久提升蛛网拳伤害，越早用越值
     idx = _find_in_bag(game, "nano_boost")
     if idx >= 0 and game.use_item(idx):
@@ -325,7 +340,8 @@ def main() -> None:
     args = sys.argv[1:]
     fog = "--no-fog" not in args           # M6：默认开视野迷雾
     noise = "--noise" in args              # M8：听觉默认关闭
-    light = "--light" in args              # M11：光照衰减默认关闭
+    flashlight = "--flashlight" in args    # M12：随身手电默认不装备
+    light = "--light" in args or flashlight   # M11：光照衰减默认关闭；--flashlight 隐含 --light
     # 听觉只在「怪物要被发现才追你」时才有意义 ⇒ --noise 隐含 --stealth
     stealth = "--stealth" in args or noise
     # M10：终端上色（纯展示层，不改字形/状态）。默认 TTY 自动开，可用 --no-color / --color 强制。
@@ -337,7 +353,7 @@ def main() -> None:
         color_on = should_color()
     rng = RandomSource(seed=SEED)
     game = Game.procedural(rng, depth=1, fov=fog, stealth=stealth,
-                           noise=noise, light=light)
+                           noise=noise, light=light, flashlight=flashlight)
     print(f"=== 第 {game.depth} 层「{game.level_name}」（seed={SEED}）===")
     if fog:
         print(LEGEND)
@@ -349,6 +365,9 @@ def main() -> None:
     if light:
         print("光照模式：房间有灯、走廊昏暗——暗处的敌人视野缩短（全黑 2 格 / 昏暗 4 格 / 明亮 7 格）；"
               "配合 --stealth 才能摸到暗处的哨兵。")
+    if flashlight:
+        print("手电模式：蛛网发射器探照灯已装备——开灯照亮四周、关灯摸黑潜行；"
+              "演示里会「潜行摸黑、交手开灯」地自动开关。")
     print(_colored(game, color_on))
     print(f"玩家 HP: {game.player_hp}/{game.player_max_hp} | 背包: {_bag_str(game)}")
 

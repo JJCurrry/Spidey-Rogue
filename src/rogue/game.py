@@ -18,6 +18,10 @@
                   （light=False ⇒ 怪物感知半径恒满、render() 字形一字不差，M1~M10 一字节不变）；
                   暗处只缩短怪物感知半径（恒 ≤ MONSTER_SIGHT_RADIUS），
                   所以「怪看得见你 ⇒ 你看得见它」的硬性质不破。
+注意（不变量 #13）：M12 随身手电是玩家可开关的动态光源，纯几何、不消耗 RandomSource；
+                  默认关闭（flashlight=False ⇒ 即使 light=True 也与 M11 逐字节一致）；
+                  开启时只在玩家处追加一个半径 FLASHLIGHT_RADIUS 的光源，同样只缩短怪物感知
+                  （半径恒 ≤ MONSTER_SIGHT_RADIUS），对称硬性质不破；toggle 不改写任何玩法状态。
 """
 from __future__ import annotations
 from typing import NamedTuple
@@ -30,9 +34,9 @@ from .fov import (SIGHT_RADIUS, SPIDER_SENSE_RADIUS, MONSTER_SIGHT_RADIUS,
                   has_line_of_sight)
 from .sound import (NOISE_COST_FLOOR, NOISE_COST_WALL, noise_field,
                     noise_reaches)
-from .light import (ROOM_LIGHT_RADIUS, PLAYER_GLOW_RADIUS, LIGHT_LEVEL_LIT,
-                    LIGHT_LEVEL_DIM, LIGHT_LEVEL_DARK, light_field,
-                    monster_sight_radius)
+from .light import (ROOM_LIGHT_RADIUS, PLAYER_GLOW_RADIUS, FLASHLIGHT_RADIUS,
+                    LIGHT_LEVEL_LIT, LIGHT_LEVEL_DIM, LIGHT_LEVEL_DARK,
+                    light_field, monster_sight_radius)
 
 # M1 采用固定小房间（程序化生成见 M5 的 level.py；默认仍是这张教学图）
 _MAP = [
@@ -198,7 +202,7 @@ class Game:
     def __init__(self, rng: RandomSource | None = None, level: Level | None = None,
                  populate: bool = True, fov: bool = False,
                  stealth: bool = False, noise: bool = False,
-                 light: bool = False) -> None:
+                 light: bool = False, flashlight: bool = False) -> None:
         """rng 为注入的随机源；level 为 None 时用 M1 的固定教学图，否则装载程序化楼层。
 
         populate 控制装载时是否自动撒怪与补给（测试生成期结构时可关掉）。
@@ -211,6 +215,8 @@ class Game:
         light 控制是否开启光照衰减（M11，默认关闭 ⇒ 怪物感知半径恒为满值、
         render() 字形一字不差，M1~M10 的行为一字节不变；显式传入 True 后
         暗处怪物视野缩短、地图按光照给出明暗梯度）。
+        flashlight 控制是否装备随身手电（M12，默认关闭 ⇒ 即使 light=True 也与 M11 逐字节一致；
+        显式传入 True 后玩家处追加一个可开关的动态光源，开灯照亮四周、关灯摸黑潜行）。
         """
         self.rng = rng or RandomSource(0)
         # M6 视野状态：fov_enabled 是渲染开关，visible/explored 是它的产物
@@ -227,6 +233,10 @@ class Game:
         # M11 光照状态：light_enabled 是光照开关，light_field 是它的产物（渲染梯度 + 感知衰减）
         self.light_enabled = light
         self.light_field: dict[tuple[int, int], int] = {}
+        # M12 随身手电状态：flashlight_enabled 是「是否装备手电」的开关（opt-in，默认关闭）；
+        # flashlight_on 是当前是否点亮（默认与装备状态一致：装备即点亮，玩家可随时 toggle）。
+        self.flashlight_enabled = flashlight
+        self.flashlight_on = flashlight
         # M2 玩家状态（跨层保留：HP / 背包 / 纳米加成）
         self.player_max_hp = PLAYER_MAX_HP
         self.player_hp = PLAYER_MAX_HP
@@ -827,16 +837,19 @@ class Game:
     @classmethod
     def procedural(cls, rng: RandomSource, depth: int = 1,
                    fov: bool = False, stealth: bool = False,
-                   noise: bool = False, light: bool = False) -> "Game":
+                   noise: bool = False, light: bool = False,
+                   flashlight: bool = False) -> "Game":
         """开一局程序化楼层：生成与撒点共用同一个 rng，先后固定（#1/#2）。
 
         fov=True 时开启视野/迷雾（M6，默认关闭）；
         stealth=True 时开启怪物感知与潜行（M7，默认关闭）；
         noise=True 时开启噪音与听觉（M8，默认关闭）；
-        light=True 时开启光照衰减（M11，默认关闭）。
+        light=True 时开启光照衰减（M11，默认关闭）；
+        flashlight=True 时装备随身手电（M12，默认关闭，需配合 light=True 才有意义）。
         """
         return cls(rng=rng, level=generate_level(rng, depth=depth),
-                   fov=fov, stealth=stealth, noise=noise, light=light)
+                   fov=fov, stealth=stealth, noise=noise, light=light,
+                   flashlight=flashlight)
 
     def load_level(self, level: Level, populate: bool = True) -> None:
         """装载一层程序化楼层：重置地形与实体，**保留**玩家 HP / 背包 / 伤害加成。
@@ -948,11 +961,17 @@ class Game:
     #          光遇墙即断（与 M6 视线同哲学，与 M8 声音绕墙不同），
     #          于是「房间亮、走廊与死角暗」天然形成明暗梯度，暗处的哨兵成了近视眼。
     def _light_sources(self) -> list[tuple[int, int, int]]:
-        """当前楼层的光源列表（房间中心固定灯 + 玩家随身微光）。"""
+        """当前楼层的光源列表（房间中心固定灯 + 玩家随身微光 + 随身手电）。
+
+        M12：flashlight_on 仅在「光照已开启且手电已装备并点亮」时才追加玩家处的
+        动态光源（FLASHLIGHT_RADIUS）；手电默认不装备 ⇒ 列表与 M11 完全一致（#13）。
+        """
         sources = [(r.center[0], r.center[1], ROOM_LIGHT_RADIUS)
                    for r in self.rooms]
         if self.light_enabled:
             sources.append((self.px, self.py, PLAYER_GLOW_RADIUS))
+            if self.flashlight_on:
+                sources.append((self.px, self.py, FLASHLIGHT_RADIUS))
         return sources
 
     def update_light(self) -> None:
@@ -971,6 +990,18 @@ class Game:
         if not self.light_enabled:
             return LIGHT_LEVEL_LIT
         return self.light_field.get((x, y), LIGHT_LEVEL_DARK)
+
+    def toggle_flashlight(self) -> bool:
+        """开关随身手电（M12，纯状态操作、不消耗 RandomSource、不改写任何玩法状态，#13）。
+
+        翻转 `flashlight_on` 后顺手重算光照场（与 `update_fov` 里那次同源，纯几何、零随机）。
+        只在光照已开启时才会真正改变光照场；光照关掉时只是翻转一个无意义标志位。
+        返回切换后的点亮状态。换层（descend → load_level）会保留 `flashlight_on`
+        （手电是玩家随身装备，与 HP / 背包 / 纳米加成同属跨层保留状态）。
+        """
+        self.flashlight_on = not self.flashlight_on
+        self.update_light()
+        return self.flashlight_on
 
     def is_visible(self, x: int, y: int) -> bool:
         return (x, y) in self.visible
