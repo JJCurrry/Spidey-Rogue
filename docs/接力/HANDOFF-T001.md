@@ -10,7 +10,7 @@
 - [x] M1 格子地图 + 玩家移动 + 单测 — 同 commit
 - [x] 门禁实证：seed-guard 拦截裸 random；gate 四道门全绿
 - [x] 产品主题明确为 MCU 荷兰弟（Tom Holland）版蜘蛛侠（四件制品同步）— commit `b202213`
-- [x] M2 战斗系统：玩家/怪物 HP、`player_attack`（蛛网拳，伤害=基础+Seed 浮动）、HP 钳制 #3、确定性 #2、随机仅经 `RandomSource` #1、`spawn_monster` 手摆怪物、移动不可穿怪、`tests/test_combat.py`（10 例）— commit `M2HASH`
+- [x] M2 战斗系统：玩家/怪物 HP、`player_attack`（蛛网拳，伤害=基础+Seed 浮动）、HP 钳制 #3、确定性 #2、随机仅经 `RandomSource` #1、`spawn_monster` 手摆怪物、移动不可穿怪、`tests/test_combat.py`（10 例）— commit `defb2c9`
 
 ## 下一步指令（给下一个会话 / M3）
 1. 读 `CLAUDE.md` → 拉 `docs/工单/T-003*`（怪物 AI）或新建。
