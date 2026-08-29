@@ -9,6 +9,7 @@
 - [x] 治理脚手架（七件套 + 流水线 seed-guard）— commit `fdfaa30716477ab5c7b7e6435b5ee716a4d8b402`
 - [x] M1 格子地图 + 玩家移动 + 单测 — 同 commit
 - [x] 门禁实证：seed-guard 拦截裸 random；gate 四道门全绿
+- [x] 产品主题明确为 MCU 荷兰弟（Tom Holland）版蜘蛛侠（四件制品同步）— commit `b202213`
 
 ## 下一步指令（给下一个会话 / M2）
 1. 读 `CLAUDE.md` → 拉 `docs/工单/T-002*`（战斗）或新建。
