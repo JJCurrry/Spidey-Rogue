@@ -148,8 +148,10 @@ class PygameRenderer:
         pygame.init()
         self.screen = pygame.display.set_mode((w, h))
         pygame.display.set_caption(caption)
-        self.font = pygame.font.SysFont("consolas, monospace", max(13, cell_size - 9))
-        self.big_font = pygame.font.SysFont("consolas, monospace", 30)
+        # 优先中文字体（Windows 常见微软雅黑），headless 或无该字体时回退到系统默认
+        self.font = pygame.font.SysFont("Microsoft YaHei, Consolas, monospace",
+                                        max(13, cell_size - 9))
+        self.big_font = pygame.font.SysFont("Microsoft YaHei, Consolas, monospace", 30)
         self.detail = cell_size >= 16     # 小 cell（headless 测试）跳过精细纹理
         self._build_tiles()
         self._init_audio()
