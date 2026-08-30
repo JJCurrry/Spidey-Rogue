@@ -77,6 +77,7 @@ from rogue import Game
 from rogue.game import DECOY_KEY, NOISE_DECOY
 from rogue.rng import RandomSource
 from rogue.color import colorize, should_color  # M10：纯展示层上色
+from rogue.web_storage import get_default_backend  # M29：网页版 localStorage 后端（按环境自动选）
 
 SEED = 19                # 演示种子（挑过：三层都有怪，且能在回合上限内清场）
 MAX_DEPTH = 3            # 演示下潜到第几层收工
@@ -92,6 +93,10 @@ DIRS = ((0, -1), (0, 1), (-1, 0), (1, 0))
 
 # M26 存档 / 读档：默认存档路径（交互模式按 S 存、L 读；已加入 .gitignore）
 SAVE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "savegame.json")
+
+# M29 存档后端：按运行环境自动挑选——浏览器(pygbag/wasm)用 localStorage，
+# 桌面终端/GUI 回退到文件（SAVE_PATH）。S/L 按键一律走 SAVE_BACKEND，不写死路径。
+SAVE_BACKEND = get_default_backend(SAVE_PATH)
 
 # M21：可键盘操作模式的控制映射与帮助文本。
 # 移动保持 4 向（与 M1 网格一致，避免斜向穿墙角，#4）。方向键原始转义序列也纳入，
@@ -422,17 +427,20 @@ def _handle_key(game: Game, key: str) -> tuple[bool, str]:
     raw = key.strip()
     low = raw.lower()
     # M26 存档 / 读档（大写 S/L，避免与移动键 s=下 / l=右 冲突）：
-    # 纯文件 I/O + 状态恢复，不引入随机、不改写渲染以外的状态（#1/#2/#8）。
+    # 纯传输 I/O + 状态恢复，不引入随机、不改写渲染以外的状态（#1/#2/#8）。
+    # M29：传输层走 SAVE_BACKEND——浏览器用 localStorage、桌面回退文件，调用方无感。
     if raw in ("S", "L"):
         try:
+            if SAVE_BACKEND is None:
+                raise RuntimeError("存档后端不可用")
             if raw == "S":
-                game.save(SAVE_PATH)
-                return True, "已存档（savegame.json）"
-            game.load_into(SAVE_PATH)
-            return True, "已读档（savegame.json）"
+                SAVE_BACKEND.save(game)
+                return True, "已存档"
+            SAVE_BACKEND.load_into(game)
+            return True, "已读档"
         except FileNotFoundError:
             return False, "没有找到存档文件（先用 S 存档）"
-        except Exception as exc:  # 存档损坏等
+        except Exception as exc:  # 存档损坏 / localStorage 不可用等
             return False, f"读档失败：{exc}"
     mv = MOVE_KEYS.get(raw, MOVE_KEYS.get(low))
     if mv is not None:

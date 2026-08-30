@@ -48,7 +48,9 @@ def role_scope() -> list[str]:
     # .workbuddy 是 AI 工作记忆目录（非源码、不入版本库），纳入白名单避免常驻误报
     allowed_dirs = {".git", "src", "tests", "docs", "scripts", ".github", ".workbuddy", "tiles"}
     allowed_files = {"README.md", "CLAUDE.md", "CODEOWNERS",
-                     ".gitignore", ".pre-commit-config.yaml", "main.py"}
+                     ".gitignore", ".pre-commit-config.yaml", "main.py",
+                     "web.py", "build_wasm.bat", "build_wasm.sh",
+                     "play_gui.bat", "play_web.bat", "play_web.sh"}
     for p in ROOT.iterdir():
         if p.name in allowed_dirs:
             continue
