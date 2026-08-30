@@ -27,3 +27,16 @@ class RandomSource:
 
     def chance(self, p: float) -> bool:
         return self._rng.random() < p
+
+    def get_state(self) -> dict:
+        """导出内部 PRNG 的完整状态（用于存档 / 读档）。
+
+        返回 JSON 可序列化 dict；读档时经 `set_state` 原样恢复，
+        保证「存档处」与「读档后」的随机序列逐字节衔接（对应不变量 #2 / #26）。
+        """
+        version, internal, gauss = self._rng.getstate()
+        return {"version": version, "internal": list(internal), "gauss": gauss}
+
+    def set_state(self, state: dict) -> None:
+        """从存档快照恢复内部 PRNG 状态（不引入任何新随机；不变量 #1/#26）。"""
+        self._rng.setstate((state["version"], tuple(state["internal"]), state["gauss"]))

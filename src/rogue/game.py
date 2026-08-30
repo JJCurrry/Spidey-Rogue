@@ -42,6 +42,7 @@
                   ⇒ 永久黑暗、不可恢复；换层（load_level）重置 destroyed_lights。
 """
 from __future__ import annotations
+import json
 from typing import NamedTuple
 from .rng import RandomSource
 from .tiles import (WALL, FLOOR, PLAYER, MONSTER, ITEM, STAIRS, UNSEEN, SENSE,
@@ -131,6 +132,9 @@ MONSTERS_PER_ROOM_MAX = 2      # 有怪的房间里刷几只（1~该值，经 rn
 ITEM_ROOM_PROB = 0.6           # 每间房放一件补给的概率（经 rng.chance，#1）
 MONSTER_HP_PER_DEPTH = 1       # 怪物 HP 随楼层号的成长量
 MONSTER_PLACE_TRIES = 8        # 单个实体在房间里找空位的尝试次数
+
+# 存档格式版本（M26）：to_dict 快照带 version，读档时做前向兼容判断
+SAVE_VERSION = 1
 
 
 class MonsterKind(NamedTuple):
@@ -252,6 +256,33 @@ class Monster:
         # 不变量 #3：HP 永不为负（引擎保证，业务不得直接写负）
         self.hp = max(0, self.hp - dmg)
         return self.hp
+
+    # ---------- M26 存档 / 读档（纯数据快照，不引入随机，#1/#26）----------
+    def to_dict(self) -> dict:
+        """导出怪物当前状态的完整快照（JSON 可序列化）。"""
+        return {
+            "name": self.name, "x": self.x, "y": self.y,
+            "max_hp": self.max_hp, "hp": self.hp, "attack": self.attack,
+            "behavior": self.behavior, "stunned": self.stunned,
+            "alerted": self.alerted, "alert_turns": self.alert_turns,
+            "last_seen": list(self.last_seen) if self.last_seen else None,
+            "home": list(self.home), "alert_cause": self.alert_cause,
+            "boss": self.boss,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Monster":
+        """从快照重建怪物（沿用既有构造，再覆盖可变状态；不引入随机，#1/#26）。"""
+        m = cls(d["name"], d["x"], d["y"], d["max_hp"], d["attack"], d["behavior"])
+        m.hp = d["hp"]
+        m.stunned = d["stunned"]
+        m.alerted = d["alerted"]
+        m.alert_turns = d["alert_turns"]
+        m.last_seen = tuple(d["last_seen"]) if d["last_seen"] else None
+        m.home = tuple(d["home"])
+        m.alert_cause = d["alert_cause"]
+        m.boss = d["boss"]
+        return m
 
 
 class LightSwitch:
@@ -963,6 +994,142 @@ class Game:
         """
         return bool(self.boss_enabled and self.boss is not None
                     and not self.boss.alive and not self.player_dead)
+
+    # ---------- M26 存档 / 读档（save / load）----------
+    # 不变量 #26：存档→读档必须逐字节同态，且读档后续演化与「从未存读、并行推进」完全一致。
+    # 设计要点（与交接文档一致）：本质保存「seed + rng 内部状态 + 全部玩法状态」。
+    #   - rng 内部状态经 RandomSource.get_state/set_state 完整保存 ⇒ 读档后随机序列无缝衔接（#1/#2）；
+    #   - 所有集合 / 字典按可复现顺序序列化（坐标转列表、排序），保证导出幂等、可还原；
+    #   - 纯数据快照、不调用任何随机、不写任何状态 ⇒ #1/#2/#8 不破；
+    #   - 默认不触发（opt-in 能力）：游戏照常运行不受影响，只有显式 save/load 才触碰。
+    def to_dict(self) -> dict:
+        """导出当前游戏状态的完整快照（JSON 可序列化、可还原、幂等）。"""
+        def _coords(seq):
+            return sorted([list(t) for t in seq])
+        def _field(d):
+            return sorted((list(k), v) for k, v in d.items())
+        return {
+            "format": "roguelike-save",
+            "version": SAVE_VERSION,
+            "seed": self.rng.seed,
+            "rng_state": self.rng.get_state(),
+            # 开关（opt-in 标志，决定渲染 / 感知 / 光照等玩法分支）
+            "fov_enabled": self.fov_enabled,
+            "stealth_enabled": self.stealth_enabled,
+            "noise_enabled": self.noise_enabled,
+            "light_enabled": self.light_enabled,
+            "flashlight_enabled": self.flashlight_enabled,
+            "flashlight_on": self.flashlight_on,
+            "switches_enabled": self.switches_enabled,
+            "boss_enabled": self.boss_enabled,
+            "boss_depth": self.boss_depth,
+            # 玩家（跨层保留的状态）
+            "player_max_hp": self.player_max_hp,
+            "player_hp": self.player_hp,
+            "player_dmg_bonus": self.player_dmg_bonus,
+            # 楼层 / 地图
+            "px": self.px, "py": self.py,
+            "width": self.width, "height": self.height,
+            "depth": self.depth,
+            "level_name": self.level_name,
+            "grid": [list(row) for row in self.grid],
+            "rooms": [{"x": r.x, "y": r.y, "w": r.w, "h": r.h} for r in self.rooms],
+            "stairs": list(self.stairs) if self.stairs else None,
+            # 实体层
+            "monsters": [m.to_dict() for m in self.monsters],
+            "items": [{"key": it.key, "x": it.x, "y": it.y} for it in self.items],
+            "inventory": [{"key": it.key, "x": it.x, "y": it.y} for it in self.inventory],
+            "switches": [{"x": s.x, "y": s.y,
+                          "room_center": list(s.room.center),
+                          "destroyed": s.destroyed} for s in self.switches],
+            "boss_index": (self.monsters.index(self.boss)
+                           if self.boss is not None else None),
+            # 衍生 / 记忆状态（纯几何计算结果，原样保存避免重算漂移）
+            "visible": _coords(self.visible),
+            "explored": _coords(self.explored),
+            "switched_lights": _coords(self.switched_lights),
+            "destroyed_lights": _coords(self.destroyed_lights),
+            "light_field": _field(self.light_field),
+            "ambient_field": _field(self.ambient_field),
+            "monster_light_field": _field(self.monster_light_field),
+            # 演示 / 渲染辅助状态
+            "last_attack_sneak": self.last_attack_sneak,
+            "last_noise_loudness": self.last_noise_loudness,
+            "last_noise_heard": self.last_noise_heard,
+        }
+
+    def apply_state(self, data: dict) -> None:
+        """把存档快照原样恢复到本 Game 实例（用于 load / load_into / from_dict）。
+
+        不变量 #26：恢复后本实例与「从未存读、并行推进」的另一个实例后续演化完全一致。
+        """
+        self.rng = RandomSource(data["seed"])
+        self.rng.set_state(data["rng_state"])
+        self.fov_enabled = data["fov_enabled"]
+        self.stealth_enabled = data["stealth_enabled"]
+        self.noise_enabled = data["noise_enabled"]
+        self.light_enabled = data["light_enabled"]
+        self.flashlight_enabled = data["flashlight_enabled"]
+        self.flashlight_on = data["flashlight_on"]
+        self.switches_enabled = data["switches_enabled"]
+        self.boss_enabled = data["boss_enabled"]
+        self.boss_depth = data["boss_depth"]
+        self.player_max_hp = data["player_max_hp"]
+        self.player_hp = data["player_hp"]
+        self.player_dmg_bonus = data["player_dmg_bonus"]
+        self.px, self.py = data["px"], data["py"]
+        self.width = data["width"]
+        self.height = data["height"]
+        self.depth = data["depth"]
+        self.level_name = data["level_name"]
+        self.grid = [list(row) for row in data["grid"]]
+        self.rooms = [Room(d["x"], d["y"], d["w"], d["h"]) for d in data["rooms"]]
+        self.stairs = tuple(data["stairs"]) if data["stairs"] else None
+        self.monsters = [Monster.from_dict(m) for m in data["monsters"]]
+        self.items = [Item(d["key"], d["x"], d["y"]) for d in data["items"]]
+        self.inventory = [Item(d["key"], d["x"], d["y"]) for d in data["inventory"]]
+        self.switches = []
+        for s in data["switches"]:
+            room = next((r for r in self.rooms
+                         if r.center == (s["room_center"][0], s["room_center"][1])), None)
+            sw = LightSwitch(s["x"], s["y"], room)
+            sw.destroyed = s["destroyed"]
+            self.switches.append(sw)
+        self.boss = (self.monsters[data["boss_index"]]
+                     if data["boss_index"] is not None else None)
+        self.visible = {tuple(t) for t in data["visible"]}
+        self.explored = {tuple(t) for t in data["explored"]}
+        self.switched_lights = {tuple(t) for t in data["switched_lights"]}
+        self.destroyed_lights = {tuple(t) for t in data["destroyed_lights"]}
+        self.light_field = {tuple(k): v for k, v in data["light_field"]}
+        self.ambient_field = {tuple(k): v for k, v in data["ambient_field"]}
+        self.monster_light_field = {tuple(k): v for k, v in data["monster_light_field"]}
+        self.last_attack_sneak = data["last_attack_sneak"]
+        self.last_noise_loudness = data["last_noise_loudness"]
+        self.last_noise_heard = data["last_noise_heard"]
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Game":
+        """从快照重建一个全新的 Game 实例（不改动传入数据）。"""
+        g = cls(rng=RandomSource(data.get("seed", 0)))  # 占位构造，apply_state 会整体覆盖
+        g.apply_state(data)
+        return g
+
+    def save(self, path: str) -> None:
+        """把当前状态写入存档文件（JSON，确定性排序 ⇒ 同状态同字节）。"""
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(self.to_dict(), f, ensure_ascii=False, indent=2, sort_keys=True)
+
+    @classmethod
+    def load(cls, path: str) -> "Game":
+        """从存档文件读取并重建 Game 实例。"""
+        with open(path, "r", encoding="utf-8") as f:
+            return cls.from_dict(json.load(f))
+
+    def load_into(self, path: str) -> None:
+        """从存档文件读取并原地恢复到本 Game 实例（交互模式读档用：不更换对象引用）。"""
+        with open(path, "r", encoding="utf-8") as f:
+            self.apply_state(json.load(f))
 
     # ---------- M5 程序化关卡 ----------
     # 不变量 #1：撒点用的随机全部经 self.rng（RandomSource），本模块不直接引入随机模块。

@@ -61,6 +61,10 @@ M25：加 `--boss` 可在最终层（seed 程序化楼层的第 MAX_DEPTH 层）
 Boss 是纯几何、零随机的确定性实体：只在最终层出现、攻击压在平衡基线内、半血会确定性「暴怒」+1；
 不加 `--boss` ⇒ 与 M24 逐字节一致（零回归）。`--play` / `--gui` 下站在绿魔身上即开打，
 击败后窗口弹出胜利画面、终端打出「把绿魔掀翻在楼顶」的胜利语。
+
+M26：存档 / 读档——`--play` / `--gui` 交互模式下按 S 保存当前进度、按 L 恢复上次存档
+（savegame.json）。存档保存「seed + PRNG 内部状态 + 全部玩法状态」，读档后随机序列无缝衔接、
+后续演化与「从未存读」完全一致（不变量 #26）；纯数据快照、不引入随机、不改玩法结果。
 """
 from __future__ import annotations
 import os
@@ -86,6 +90,9 @@ LEGEND = ("图例：@ 蜘蛛侠 | B 最终层 Boss（绿魔）| M 已察觉你�
 
 DIRS = ((0, -1), (0, 1), (-1, 0), (1, 0))
 
+# M26 存档 / 读档：默认存档路径（交互模式按 S 存、L 读；已加入 .gitignore）
+SAVE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "savegame.json")
+
 # M21：可键盘操作模式的控制映射与帮助文本。
 # 移动保持 4 向（与 M1 网格一致，避免斜向穿墙角，#4）。方向键原始转义序列也纳入，
 # 但交互循环默认用 input() 读取，终端是否发转义序列取决于前端；WASD/hjkl 始终可用。
@@ -105,6 +112,7 @@ CONTROLS_HELP = (
     "蛛丝摆荡突袭（M7，仅潜行模式有未察觉目标时）：E\n"
     "随身手电开关（M12，需 --flashlight）：F\n"
     "下潜（站在 > 楼梯上）：>\n"
+    "存档（保存当前进度）：S    读档（恢复上次存档）：L\n"
     "查看本说明：?    退出：Q\n"
 )
 
@@ -413,6 +421,19 @@ def _handle_key(game: Game, key: str) -> tuple[bool, str]:
     """
     raw = key.strip()
     low = raw.lower()
+    # M26 存档 / 读档（大写 S/L，避免与移动键 s=下 / l=右 冲突）：
+    # 纯文件 I/O + 状态恢复，不引入随机、不改写渲染以外的状态（#1/#2/#8）。
+    if raw in ("S", "L"):
+        try:
+            if raw == "S":
+                game.save(SAVE_PATH)
+                return True, "已存档（savegame.json）"
+            game.load_into(SAVE_PATH)
+            return True, "已读档（savegame.json）"
+        except FileNotFoundError:
+            return False, "没有找到存档文件（先用 S 存档）"
+        except Exception as exc:  # 存档损坏等
+            return False, f"读档失败：{exc}"
     mv = MOVE_KEYS.get(raw, MOVE_KEYS.get(low))
     if mv is not None:
         dx, dy = mv

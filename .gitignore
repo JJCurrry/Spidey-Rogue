@@ -3,3 +3,4 @@ __pycache__/
 .venv/
 scripts/.ratchet.bak
 .workbuddy/
+savegame.json
