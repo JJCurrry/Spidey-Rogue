@@ -1,0 +1,4 @@
+# M28 网页化（Pygbag）构建依赖
+# 桌面窗口模式只需 requirements.txt 的 pygame；构建 wasm / 浏览器预览需要 pygbag。
+# pygbag 自带 wasm 版 pygame 运行时，打包时无需把 pygame 打进 web 包。
+pygbag>=0.4

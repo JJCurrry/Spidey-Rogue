@@ -12,6 +12,7 @@
 import os
 import sys
 import unittest
+import asyncio
 
 ROOT = os.path.dirname(__file__)
 sys.path.insert(0, os.path.join(ROOT, "..", "src"))   # rogue 包
@@ -396,6 +397,38 @@ class TestM27TileSprites(unittest.TestCase):
             r.draw()
         finally:
             rp.TILES_DIR = old
+
+
+@unittest.skipUnless(_HAVE_GUI, "pygame 未安装（headless 跳过）")
+class TestM28WebAsync(unittest.TestCase):
+    """M28 网页化：async_run 是浏览器异步主循环，逻辑与 run 完全一致（共用
+    _pump_events / step / draw / _check_ending），且每帧让出事件循环不卡死 wasm。"""
+
+    def test_async_run_quit_and_yields(self):
+        import pygame
+        r = PygameRenderer(_new_game(), cell_size=8)
+        start_hp = r.game.player_hp
+        # 先发 ?（切帮助）再发 QUIT：证明事件被 _pump_events 逐条处理、且不破坏 Game
+        pygame.event.post(pygame.event.Event(pygame.KEYDOWN, key=0, unicode="?"))
+        pygame.event.post(pygame.event.Event(pygame.QUIT))
+        res = asyncio.run(r.async_run(_handle_key))
+        self.assertEqual(res, "quit")
+        self.assertTrue(r.help_shown)                 # ? 被正确处理
+        self.assertEqual(r.game.player_hp, start_hp)  # 没跑怪、没受伤（#2/#8 精神）
+        self.assertEqual(r.game.depth, 1)
+
+    def test_async_run_applies_action(self):
+        import pygame
+        r = PygameRenderer(_new_game(), cell_size=8)
+        start_hp = r.game.player_hp
+        pygame.event.post(pygame.event.Event(pygame.KEYDOWN, key=0, unicode="d"))
+        pygame.event.post(pygame.event.Event(pygame.QUIT))
+        res = asyncio.run(r.async_run(_handle_key))
+        self.assertEqual(res, "quit")
+        # d 是向右移动：可能移动也可能撞墙，但 game 状态仍合法、未崩溃、HP 不变
+        # （起始房间不刷怪 ⇒ 单步移动不会挨反击，#3 不破）
+        self.assertEqual(r.game.player_hp, start_hp)
+        self.assertEqual(r.game.depth, 1)
 
 
 if __name__ == "__main__":

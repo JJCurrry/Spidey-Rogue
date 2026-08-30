@@ -270,10 +270,16 @@ class PygameRenderer:
         pygame.init()
         self.screen = pygame.display.set_mode((w, h))
         pygame.display.set_caption(caption)
-        # 优先中文字体（Windows 常见微软雅黑），headless 或无该字体时回退到系统默认
-        self.font = pygame.font.SysFont("Microsoft YaHei, Consolas, monospace",
-                                        max(13, cell_size - 9))
-        self.big_font = pygame.font.SysFont("Microsoft YaHei, Consolas, monospace", 30)
+        # 优先中文字体（Windows 常见微软雅黑）；wasm/浏览器或缺字体时回退到内置默认字体，
+        # 保证任何环境都能构造渲染器（不依赖特定字体存在，#22/#23 纯净性延伸）。
+        _font_names = ["Microsoft YaHei", "Microsoft YaHei UI", "Consolas",
+                       "DejaVu Sans", "SimHei", "monospace"]
+        try:
+            self.font = pygame.font.SysFont(_font_names, max(13, cell_size - 9))
+            self.big_font = pygame.font.SysFont(_font_names, 30)
+        except Exception:
+            self.font = pygame.font.Font(None, max(13, cell_size - 9))
+            self.big_font = pygame.font.Font(None, 30)
         self.detail = cell_size >= 16     # 小 cell（headless 测试）跳过精细纹理
         self._build_tiles()
         self._init_audio()
@@ -997,10 +1003,30 @@ class PygameRenderer:
                 break
 
     # ---- 主循环 ----
-    def run(self, handle_key, fps: int = 30) -> str:
-        """窗口主循环。handle_key 即 main.py 的 _handle_key（与终端同函数）。
+    def _pump_events(self, handle_key) -> str | None:
+        """处理一帧累积的 pygame 事件；返回 'quit' 或 None（继续）。
 
-        每帧：读事件 → token → step(game,token)（含特效/音效）→ draw。
+        同步 run 与异步 async_run 共用 ⇒ 两条主循环逻辑零漂移（#2 精神，#28 网页化不变式）。
+        """
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                return "quit"
+            if event.type == pygame.KEYDOWN:
+                token = self.translate_key(event)
+                if token is None:
+                    continue
+                if token == "?":
+                    self.help_shown = not self.help_shown
+                    continue          # 帧末统一 draw
+                msg = self.step(token, handle_key)
+                if msg == "quit":
+                    return "quit"
+        return None
+
+    def run(self, handle_key, fps: int = 30) -> str:
+        """窗口主循环（桌面 / 同步）。handle_key 即 main.py 的 _handle_key（与终端同函数）。
+
+        每帧：读事件 → step（含特效/音效）→ 结局判定 → draw。
         返回 'win' / 'dead' / 'quit'。
         """
         self._hk = handle_key
@@ -1008,33 +1034,62 @@ class PygameRenderer:
         self.draw()
         try:
             while True:
-                for event in pygame.event.get():
-                    if event.type == pygame.QUIT:
-                        return "quit"
-                    if event.type == pygame.KEYDOWN:
-                        token = self.translate_key(event)
-                        if token is None:
-                            continue
-                        if token == "?":
-                            self.help_shown = not self.help_shown
-                            continue          # 帧末统一 draw
-                        msg = self.step(token, handle_key)
-                        if msg == "quit":
-                            return "quit"
-                        end = self._check_ending()
-                        if end is not None:
-                            return end
+                res = self._pump_events(handle_key)
+                if res is not None:
+                    return res
+                end = self._check_ending(wait=True)
+                if end is not None:
+                    return end
                 self._update_effects()
                 self.draw()
                 clock.tick(fps)
         finally:
             pygame.quit()
 
-    def _check_ending(self) -> str | None:
+    async def async_run(self, handle_key, fps: int = 30) -> str:
+        """Pygbag 浏览器异步主循环（M28 · 网页化）。
+
+        与 run() 逻辑完全一致（共用 _pump_events / step / draw / _check_ending），
+        但每帧 `await asyncio.sleep(0)` 把控制权交还浏览器事件循环——wasm 单线程下
+        不 yield 就会卡死页面。同 seed + 同按键序列 ⇒ 同结果（不变量 #2，#28 网页化不变式）。
+        """
+        import asyncio
+        self._hk = handle_key
+        clock = pygame.time.Clock()
+        self.draw()
+        try:
+            while True:
+                res = self._pump_events(handle_key)
+                if res is not None:
+                    return res
+                end = self._check_ending(wait=False)
+                if end is not None:
+                    await self._wait_key_async()
+                    return end
+                self._update_effects()
+                self.draw()
+                clock.tick(fps)
+                await asyncio.sleep(0)
+        finally:
+            pygame.quit()
+
+    async def _wait_key_async(self) -> None:
+        """异步版「等任意键」：结局横幅已画出后，等玩家按键再返回（不阻塞 wasm 线程）。"""
+        import asyncio
+        while True:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    return
+                if event.type == pygame.KEYDOWN:
+                    return
+            await asyncio.sleep(0)
+
+    def _check_ending(self, wait: bool = True) -> str | None:
         if self.game.player_dead:
             self.play_lose()
             self._draw_banner("蜘蛛侠被击倒了……（游戏结束）", (200, 60, 60))
-            self._wait_key()
+            if wait:
+                self._wait_key()
             return "dead"
         alive = [m for m in self.game.monsters if m.alive]
         if self.game.depth >= self.max_depth and not alive:
@@ -1046,7 +1101,8 @@ class PygameRenderer:
             else:
                 self._draw_banner("三层清场，蜘蛛侠摆荡着回家吃三明治。（你赢了！）",
                                   (90, 200, 120))
-            self._wait_key()
+            if wait:
+                self._wait_key()
             return "win"
         return None
 

@@ -4,3 +4,4 @@ __pycache__/
 scripts/.ratchet.bak
 .workbuddy/
 savegame.json
+build/

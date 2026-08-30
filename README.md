@@ -53,6 +53,27 @@ python scripts/review_pipeline.py
 
 ---
 
+## 1b. 网页版（Pygbag，M28）
+
+把已有的 Pygame 窗口原样打包成 wasm，浏览器直接玩——游戏核心零改动（不变量 #28）。
+
+```bash
+# 1) 装构建依赖（只在构建/预览时需要的；桌面窗口模式仍只依赖 requirements.txt 的 pygame）
+pip install -r requirements-web.txt
+
+# 2) 本地预览：自动起静态服务器 + websocket 中继，浏览器打开它提示的地址
+pygbag web.py
+#   或等价地用仓库脚本：build_wasm.bat（Windows）/ build_wasm.sh（Linux·macOS）
+
+# 3) 产出可托管的静态包：build/web/（丢到任意静态服务器即可）
+pygbag --build web.py
+```
+
+网页版与桌面 `--gui` 控制完全一致：WASD/方向键 移动（撞怪=攻击）· G 拾取 · 1-5 用道具 ·
+E 蛛网摆荡突袭 · F 手电 · > 下潜 · 空格/回车 等待 · ? 帮助 · Q 退出。
+默认开「全开」展示（视野/潜行/听觉/光照/手电/开关/Boss）；可用 `--no-fog`/`--no-boss` 等旗标收窄。
+`web.py` 复用 `main._handle_key` 与 `Game.procedural`，零改核心、确定性不变（不变量 #28）。
+
 ## 2. 在新工作空间开新会话时，贴这段话
 
 > 这是一个用 AI Coding 方法开发、以**MCU 荷兰弟（Tom Holland）版蜘蛛侠（Spider-Man）**为主角的终端 Roguelike（仓库 `roguelike-ai-coding`）。
