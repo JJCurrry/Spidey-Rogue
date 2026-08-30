@@ -262,9 +262,13 @@ class Game:
         self.noise_enabled = noise
         self.last_noise_loudness = 0    # 上一次发声的响度（0 = 还没发出过动静）
         self.last_noise_heard = 0       # 上一次动静惊动了几只敌人（供演示读取）
-        # M11 光照状态：light_enabled 是光照开关，light_field 是它的产物（渲染梯度 + 感知衰减）
+        # M11 光照状态：light_enabled 是光照开关；
+        #   light_field    = 完整光照场（房间灯 + 玩家微光 + 随身手电），用于渲染梯度 / M11 怪物感知 / M13 玩家视野；
+        #   ambient_field  = 环境光照场（仅房间灯，不含玩家微光与手电），M17 新增——把「静态环境照明」与
+        #                     「玩家随身光源」拆开，便于未来按需对二者分别取用（如让某判定只看环境光）。
         self.light_enabled = light
         self.light_field: dict[tuple[int, int], int] = {}
+        self.ambient_field: dict[tuple[int, int], int] = {}
         # M12 随身手电状态：flashlight_enabled 是「是否装备手电」的开关（opt-in，默认关闭）；
         # flashlight_on 是当前是否点亮（默认与装备状态一致：装备即点亮，玩家可随时 toggle）。
         self.flashlight_enabled = flashlight
@@ -1011,13 +1015,17 @@ class Game:
         return self.visible
 
     # ---------- M11 光照衰减（明暗梯度 + 暗处缩短怪物感知半径）----------
-    # 不变量 #1/#2：光照是纯几何（`light.light_field`），不消耗 RandomSource；
-    #          不变量 #8：只读 grid 与坐标，不改写任何状态（update_light 只写 self.light_field）。
+    # 不变量 #1/#2：光照是纯几何（`light.light_field` / `light.ambient_field`），不消耗 RandomSource；
+    #          不变量 #8：只读 grid 与坐标，不改写任何状态（update_light 只写 self.light_field / ambient_field）。
     # 不变量 #9 延伸：光照只缩短怪物感知半径（monster_sight_radius 恒 ≤ MONSTER_SIGHT_RADIUS），
     #          所以「怪看得见你 ⇒ 你看得见它」的硬性质不被破坏。
-    # 设计要点（ADR-007）：光源 = 房间中心固定灯 + 玩家随身微光；
+    # 设计要点（ADR-007 / ADR-013）：光源 = 房间中心固定灯 + 玩家随身微光；
     #          光遇墙即断（与 M6 视线同哲学，与 M8 声音绕墙不同），
     #          于是「房间亮、走廊与死角暗」天然形成明暗梯度，暗处的哨兵成了近视眼。
+    # M17：把「环境光照场 ambient_field（仅房间灯）」与「完整光照场 light_field（房间灯 + 玩家微光 + 手电）」
+    #          拆开分别存储。两者都由 update_light 同源重算（纯几何、零随机、幂等）。
+    #          默认所有消费点（M11 怪物感知 / M13 玩家视野 / 渲染）仍走 light_field（完整场）⇒ 行为零回归；
+    #          ambient_field 作为「只看静态环境照明」的候选场对外暴露（ambient_level_at），供后续按需取用。
     def _light_sources(self) -> list[tuple[int, int, int]]:
         """当前楼层的光源列表（房间中心固定灯 + 玩家随身微光 + 随身手电）。
 
@@ -1038,22 +1046,51 @@ class Game:
                 sources.append((self.px, self.py, FLASHLIGHT_RADIUS))
         return sources
 
+    def _ambient_sources(self) -> list[tuple[int, int, int]]:
+        """M17：环境光源列表（仅房间中心固定灯，不含玩家微光与随身手电）。
+
+        与 _light_sources 的唯一差别是「不追加玩家处光源」——它代表楼层的静态环境照明，
+        与蜘蛛侠是否带着微光 / 手电无关。switched_lights / destroyed_lights 同样跳过（关灯 / 碎灯
+        只移除环境光源、不新增 ⇒ ambient_field 只变暗或恢复，#12/#15/#16 不破）。
+        """
+        return [(r.center[0], r.center[1], ROOM_LIGHT_RADIUS)
+                for r in self.rooms
+                if r.center not in self.switched_lights
+                and r.center not in self.destroyed_lights]
+
     def update_light(self) -> None:
         """重算逐格光照场（纯几何、零随机，不变量 #1/#2/#8）。
 
-        光照关闭时清空场（任何查询都按「全亮」处理，不改变任何行为）。
+        M17：同时算两份——
+          ambient_field = 仅房间灯（静态环境照明）；
+          light_field   = 完整场（房间灯 + 玩家微光 + 手电）。
+        两份同源、幂等；默认所有消费点走 light_field（完整场）⇒ 行为零回归。
+        光照关闭时两份都清空（任何查询都按「全亮」处理，不改变任何行为）。
         """
         if not self.light_enabled:
             self.light_field = {}
+            self.ambient_field = {}
             return
+        self.ambient_field = light_field(self.grid, self._ambient_sources())
         self.light_field = light_field(self.grid, self._light_sources())
 
     def light_level_at(self, x: int, y: int) -> int:
-        """(x,y) 的光照等级；光照关闭时恒为「明亮」（不影响任何行为，#8/#9）。
+        """(x,y) 的完整光照等级（房间灯 + 玩家微光 + 手电）；光照关闭时恒为「明亮」（不影响任何行为，#8/#9）。
         """
         if not self.light_enabled:
             return LIGHT_LEVEL_LIT
         return self.light_field.get((x, y), LIGHT_LEVEL_DARK)
+
+    def ambient_level_at(self, x: int, y: int) -> int:
+        """M17：(x,y) 的**环境**光照等级（仅房间灯，不含玩家微光与手电）。
+
+        与 light_level_at 对称：光照关闭时恒为「明亮」（不改变任何行为，#8/#9）。
+        默认不被任何玩法 / 渲染判定消费（M11 怪物感知、M13 玩家视野、colorize 仍用 light_level_at /
+        light_field），仅在需要时作为「只看静态环境照明」的查询入口对外暴露。
+        """
+        if not self.light_enabled:
+            return LIGHT_LEVEL_LIT
+        return self.ambient_field.get((x, y), LIGHT_LEVEL_DARK)
 
     def toggle_flashlight(self) -> bool:
         """开关随身手电（M12，纯状态操作、不消耗 RandomSource、不改写任何玩法状态，#13）。
