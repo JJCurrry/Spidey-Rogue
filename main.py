@@ -55,6 +55,12 @@ M16：`--light --stealth` 下蜘蛛侠改为**蛛网射碎灯泡**——比 M14 
 房间永久黑暗、不可恢复（但同样「双刃」：暗处你和怪都成了近视眼）。碎裂的轻响（3）也从灯处传出
 ⇒ 调虎离山成立。破坏是一次性不可逆的「战术承诺」：潜行路线里你本就不打算回来点亮它；
 light=False ⇒ 没有灯泡可碎，演示与 M1~M15 逐字节一致。
+
+M25：加 `--boss` 可在最终层（seed 程序化楼层的第 MAX_DEPTH 层）刷出绿魔（Green Goblin）Boss，
+把「无限下潜」收口成一局完整的胜负——击败绿魔才算真正通关（否则仍沿用 M1~M24「清场即收工」语义）。
+Boss 是纯几何、零随机的确定性实体：只在最终层出现、攻击压在平衡基线内、半血会确定性「暴怒」+1；
+不加 `--boss` ⇒ 与 M24 逐字节一致（零回归）。`--play` / `--gui` 下站在绿魔身上即开打，
+击败后窗口弹出胜利画面、终端打出「把绿魔掀翻在楼顶」的胜利语。
 """
 from __future__ import annotations
 import os
@@ -74,7 +80,7 @@ TURNS_PER_LEVEL = 80     # 单层回合上限（防死循环）
 MAP_EVERY = 15           # 每几回合补印一次地图，避免刷屏
 MOVE_LOG_EVERY = 4       # 纯走位每几步报一次，避免刷屏
 
-LEGEND = ("图例：@ 蜘蛛侠 | M 已察觉你的敌人 | m 未察觉的敌人（可倒挂突袭） | "
+LEGEND = ("图例：@ 蜘蛛侠 | B 最终层 Boss（绿魔）| M 已察觉你的敌人 | m 未察觉的敌人（可倒挂突袭） | "
           "~ 听见动静、还没看见你的敌人 | "
           "? 蜘蛛感应（看不见的威胁） | ! 补给 | > 下行楼梯 | # 墙 | . 地板 | 空白 未探索")
 
@@ -502,6 +508,10 @@ def _player_interactive(game: Game, color_on: bool,
 
 def _ending_banner(ending: str, game: Game) -> str:
     if ending == "win":
+        if getattr(game, "boss_enabled", False) and game.boss is not None \
+                and not game.boss.alive:
+            return (f"\n第 {game.depth} 层，蜘蛛侠把绿魔掀翻在纽约的楼顶，"
+                    "摆荡着回家吃梅姨的三明治。（你赢了！）")
         return (f"\n第 {game.depth} 层清场，蜘蛛侠摆荡着回家吃梅姨的三明治。"
                 "（你赢了！）")
     if ending == "dead":
@@ -535,6 +545,7 @@ def main() -> None:
     light = "--light" in args or flashlight   # M11：光照衰减默认关闭；--flashlight 隐含 --light
     play = "--play" in args                # M21：键盘操作模式（opt-in，默认仍是脚本自动驾驶 demo）
     gui = "--gui" in args                  # M22：Pygame 窗口模式（opt-in，替换 --play 的 ASCII 视图层）
+    boss = "--boss" in args                # M25：最终层刷绿魔 Boss、收口成完整胜负（opt-in，默认不刷）
     # 听觉只在「怪物要被发现才追你」时才有意义 ⇒ --noise 隐含 --stealth
     stealth = "--stealth" in args or noise
     # M10：终端上色（纯展示层，不改字形/状态）。默认 TTY 自动开，可用 --no-color / --color 强制。
@@ -547,7 +558,7 @@ def main() -> None:
     rng = RandomSource(seed=SEED)
     game = Game.procedural(rng, depth=1, fov=fog, stealth=stealth,
                            noise=noise, light=light, flashlight=flashlight,
-                           switches=light)
+                           switches=light, boss=boss, boss_depth=MAX_DEPTH)
     print(f"=== 第 {game.depth} 层「{game.level_name}」（seed={SEED}）===")
     if fog:
         print(LEGEND)
@@ -615,7 +626,12 @@ def main() -> None:
             print("\n蜘蛛侠被击倒了……（演示结束）")
             break
         if game.depth >= MAX_DEPTH and not alive:
-            print(f"\n第 {game.depth} 层清场，蜘蛛侠摆荡着回家吃梅姨的三明治。（演示结束）")
+            if getattr(game, "boss_enabled", False) and game.boss is not None \
+                    and not game.boss.alive:
+                print(f"\n第 {game.depth} 层，蜘蛛侠把绿魔掀翻在纽约的楼顶，"
+                      f"摆荡着回家吃梅姨的三明治。（你赢了！）")
+            else:
+                print(f"\n第 {game.depth} 层清场，蜘蛛侠摆荡着回家吃梅姨的三明治。（你赢了！）")
             break
     else:
         print("\n回合用尽，演示到此为止。")

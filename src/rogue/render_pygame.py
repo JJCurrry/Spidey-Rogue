@@ -493,6 +493,9 @@ class PygameRenderer:
         elif ch in ("M", "m", "~"):
             m = self.game.monster_at(gx, gy)
             self._draw_enemy(gx, gy, ch, vis, m)
+        elif ch == "B":
+            m = self.game.monster_at(gx, gy)
+            self._draw_boss(gx, gy, vis, m)
         elif ch == "!":
             it = self._item_at(gx, gy)
             self._draw_item(gx, gy, it.key if it is not None else None, vis)
@@ -579,6 +582,54 @@ class PygameRenderer:
                                 (cxp - rr, cyp - rr, rr * 2, rr * 2),
                                 math.radians(200), math.radians(340), 1)
         pygame.draw.circle(self.screen, _blend(body, -18), (cxp, cyp), r, max(1, cell // 22))
+
+    def _draw_boss(self, gx: int, gy: int, vis: bool, m) -> None:
+        """M25 最终层 Boss「绿魔」：程序化面孔（南瓜头 + 锯齿笑 + 紫帽尖），纯图元、零随机。
+
+        沿用玩家的呼吸浮动；半血暴怒（monster.effective_attack > base）时脸色转暗红、加一圈怒光，
+        纯视图状态、不回写 Game（#1/#2/#8 延伸）。字形 `B` 只在此绘制，与终端同态。
+        """
+        cell = self.cell
+        cxp, cyp = self._center(gx, gy)
+        bob = math.sin(self.frame * 0.12 + (gx + gy) * 0.7) * cell * 0.05
+        cyp += bob
+        enraged = bool(m is not None and getattr(m, "boss", False)
+                       and m.effective_attack > m.attack)
+        r = cell * 0.46                       # Boss 比杂鱼大一圈，视觉上就是威胁
+        body = (58, 150, 70) if vis else (38, 95, 46)
+        if enraged:
+            body = (150, 70, 55)              # 暴怒：脸色转暗红
+        # 怒光（暴怒时一圈脉动红环，确定性、按 frame 振荡）
+        if enraged:
+            pulse = (cell * 0.58) * (1 + 0.06 * math.sin(self.frame * 0.3))
+            pygame.draw.circle(self.screen, (200, 60, 50), (cxp, cyp), pulse, max(1, cell // 16))
+        # 南瓜头主体
+        pygame.draw.circle(self.screen, body, (cxp, cyp), r)
+        # 帽尖（绿魔招牌尖顶，朝上）
+        pygame.draw.polygon(self.screen, _blend(body, 40),
+                            [(cxp, cyp - r * 1.35), (cxp - r * 0.28, cyp - r * 0.7),
+                             (cxp + r * 0.28, cyp - r * 0.7)])
+        # 锯齿邪笑（黄）
+        mouth = (240, 210, 70)
+        for k in range(5):
+            a0 = math.radians(200 + k * 32)
+            a1 = math.radians(200 + (k + 1) * 32)
+            pygame.draw.line(self.screen, mouth,
+                             (cxp + math.cos(a0) * r * 0.9, cyp + math.sin(a0) * r * 0.55),
+                             (cxp + math.cos(a1) * r * 0.9, cyp + math.sin(a1) * r * 0.55),
+                             max(1, cell // 18))
+        # 眼睛（白底黑瞳，邪笑时眯）
+        blink = math.sin(self.frame * 0.07 + (gx - gy) * 0.9)
+        es = 0.25 if blink > 0.92 else 1.0
+        er = r * 0.24 * es
+        for sx in (-1, 1):
+            ex = cxp + sx * r * 0.4
+            ey = cyp - r * 0.18
+            pygame.draw.ellipse(self.screen, (245, 245, 235),
+                                (ex - er, ey - er * 0.7, er * 2, er * 1.4))
+            pygame.draw.ellipse(self.screen, (12, 12, 18),
+                                (ex - er * 0.5, ey - er * 0.4, er, er * 0.9))
+        pygame.draw.circle(self.screen, _blend(body, -18), (cxp, cyp), r, max(1, cell // 20))
 
     def _draw_item(self, gx: int, gy: int, key: str | None, vis: bool) -> None:
         cell = self.cell
@@ -890,8 +941,13 @@ class PygameRenderer:
         alive = [m for m in self.game.monsters if m.alive]
         if self.game.depth >= self.max_depth and not alive:
             self.play_win()
-            self._draw_banner("三层清场，蜘蛛侠摆荡着回家吃三明治。（你赢了！）",
-                              (90, 200, 120))
+            if getattr(self.game, "boss_enabled", False) and self.game.boss is not None \
+                    and not self.game.boss.alive:
+                self._draw_banner("蜘蛛侠把绿魔掀翻在楼顶！（你赢了！）",
+                                  (90, 200, 120))
+            else:
+                self._draw_banner("三层清场，蜘蛛侠摆荡着回家吃三明治。（你赢了！）",
+                                  (90, 200, 120))
             self._wait_key()
             return "win"
         return None

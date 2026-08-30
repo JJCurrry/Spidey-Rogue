@@ -45,7 +45,7 @@ from __future__ import annotations
 from typing import NamedTuple
 from .rng import RandomSource
 from .tiles import (WALL, FLOOR, PLAYER, MONSTER, ITEM, STAIRS, UNSEEN, SENSE,
-                    UNAWARE, HEARD, SWITCH)
+                    UNAWARE, HEARD, SWITCH, BOSS)
 from .level import Level, Room, generate_level, TUTORIAL_LEVEL_NAME
 from .fov import (SIGHT_RADIUS, SPIDER_SENSE_RADIUS, MONSTER_SIGHT_RADIUS,
                   visible_tiles, in_spider_sense, monster_can_see,
@@ -158,6 +158,17 @@ MONSTER_TABLE = (
     MonsterKind("沙人分身", 14, 1, "chase", 5),
 )
 
+# M25 Boss 战：最终层的「绿魔 (Green Goblin)」——把无限下潜收口成一局完整的胜负。
+# 设计哲学（与全项目一致）：Boss 是**纯几何、零随机**的确定性实体，只走既有 Game 方法；
+# 默认不刷（boss=False ⇒ 一字节不变，与 M1~M24 逐字节一致）。
+# - 只在「最终层（depth == MAX_DEPTH）且 boss=True」出现，确定性摆位（不消耗 RandomSource ⇒ #1/#2 不破）；
+# - 高 HP（30）做「战」的体量，攻击压在 3（与平衡基线 M3「相邻即挨打」相容，不破 #1~#6）；
+# - 半血「暴怒」：HP ≤ 半时攻击 +1（确定性阈值、零随机），是 Boss 区别于杂鱼的独有机制。
+BOSS_NAME = "绿魔 (Green Goblin)"
+BOSS_HP = 30                 # 比普通怪（5~14）厚得多，构成一场需要周旋的战斗
+BOSS_ATTACK = 3              # 压在平衡基线内（M3：相邻即每回合挨打，攻高会换血崩盘）
+BOSS_ENRAGE_BONUS = 1        # 半血暴怒额外攻击（确定性，非随机）
+
 
 class Item:
     """M4 道具实体（地面上的可拾取物；拾取后进入 Game.inventory）。"""
@@ -200,10 +211,22 @@ class Monster:
         # M8 被惊动的原因：看见（`CAUSE_SIGHT`）/ 听见（`CAUSE_SOUND`）/ 尚未惊动（None）
         # 只用于让画面区分「它看见你了」与「它只是听见动静」——不参与任何伤害或命中判定。
         self.alert_cause: str | None = CAUSE_SIGHT
+        # M25：是否为最终层 Boss（绿魔）。Boss 永远是已知威胁（恒画 'B'）、可半血暴怒。
+        self.boss = False
 
     @property
     def alive(self) -> bool:
         return self.hp > 0
+
+    @property
+    def effective_attack(self) -> int:
+        """M25：实际攻击力。Boss 在 HP ≤ 半时确定性「暴怒」+1（零随机、只缩短不放大）；
+
+        普通怪恒等于基础攻击。供 `monster_attack` 统一读取，保证伤害判定与渲染一致。
+        """
+        if self.boss and self.hp * 2 <= self.max_hp:
+            return self.attack + BOSS_ENRAGE_BONUS
+        return self.attack
 
     def alert(self, pos: tuple[int, int] | None = None,
               cause: str = CAUSE_SIGHT) -> None:
@@ -257,7 +280,8 @@ class Game:
                  populate: bool = True, fov: bool = False,
                  stealth: bool = False, noise: bool = False,
                  light: bool = False, flashlight: bool = False,
-                 switches: bool = False) -> None:
+                 switches: bool = False, boss: bool = False,
+                 boss_depth: int | None = None) -> None:
         """rng 为注入的随机源；level 为 None 时用 M1 的固定教学图，否则装载程序化楼层。
 
         populate 控制装载时是否自动撒怪与补给（测试生成期结构时可关掉）。
@@ -316,6 +340,13 @@ class Game:
         self.switches_enabled = switches
         self.switches: list["LightSwitch"] = []
         self.destroyed_lights: set[tuple[int, int]] = set()
+        # M25 Boss 战开关：boss_enabled 是「最终层是否刷绿魔」的开关（opt-in，默认关闭，
+        # 与 M6/M7/M8/M11/M12/M19 同一哲学——不加 --boss 时演示与 M24 逐字节一致）；
+        # boss 是最终层 Boss（绿魔）的 Monster 引用（boss=False ⇒ 恒 None，不刷、不占 rng）。
+        self.boss_enabled = boss
+        # M25：Boss 出现的楼层（由演示入口 main.py 传 MAX_DEPTH）。为 None 时不刷（安全默认）。
+        self.boss_depth = boss_depth
+        self.boss: "Monster | None" = None
         # M2 玩家状态（跨层保留：HP / 背包 / 纳米加成）
         self.player_max_hp = PLAYER_MAX_HP
         self.player_hp = PLAYER_MAX_HP
@@ -591,11 +622,15 @@ class Game:
             m.calm()
 
     def monster_attack(self, m: Monster) -> int:
-        """怪物攻击相邻玩家（固定伤害，确定性；不变量 #3 由 _hurt_player 钳制）。"""
+        """怪物攻击相邻玩家（固定伤害，确定性；不变量 #3 由 _hurt_player 钳制）。
+
+        M25：伤害走 `m.effective_attack`——绿魔 Boss 半血暴怒时确定性 +1（零随机）。
+        """
         if not m.alive or not self.is_adjacent(m.x, m.y):
             return 0
-        self._hurt_player(m.attack)
-        return m.attack
+        dmg = m.effective_attack
+        self._hurt_player(dmg)
+        return dmg
 
     def _valid_monster_moves(self, m: Monster) -> list[tuple[int, int]]:
         """四方向正交相邻且可进入的格子（不含斜向，与玩家移动一致）。"""
@@ -919,6 +954,16 @@ class Game:
     def player_dead(self) -> bool:
         return self.player_hp <= 0
 
+    def is_victory(self) -> bool:
+        """M25 胜利闭环：boss 模式下，最终层绿魔被击败即胜（玩家未阵亡）。
+
+        非 boss 模式恒为 False（胜利沿用 M1~M24 的「清场即收工」语义，不破其行为）；
+        boss 模式下绿魔是最终层唯一怪物（_populate_level 已跳过普通撒怪），
+        故击败它 ⇔ 最终层清场 ⇔ 一局完整的胜负收口。纯状态查询，不写任何状态（#8 延伸）。
+        """
+        return bool(self.boss_enabled and self.boss is not None
+                    and not self.boss.alive and not self.player_dead)
+
     # ---------- M5 程序化关卡 ----------
     # 不变量 #1：撒点用的随机全部经 self.rng（RandomSource），本模块不直接引入随机模块。
     # 不变量 #2：先生成地形、再按固定房间顺序撒点 ⇒ 同 seed + 同 depth ⇒ 同楼层。
@@ -927,7 +972,8 @@ class Game:
     def procedural(cls, rng: RandomSource, depth: int = 1,
                    fov: bool = False, stealth: bool = False,
                    noise: bool = False, light: bool = False,
-                   flashlight: bool = False, switches: bool = False) -> "Game":
+                   flashlight: bool = False, switches: bool = False,
+                   boss: bool = False, boss_depth: int | None = None) -> "Game":
         """开一局程序化楼层：生成与撒点共用同一个 rng，先后固定（#1/#2）。
 
         fov=True 时开启视野/迷雾（M6，默认关闭）；
@@ -935,11 +981,13 @@ class Game:
         noise=True 时开启噪音与听觉（M8，默认关闭）；
         light=True 时开启光照衰减（M11，默认关闭）；
         flashlight=True 时装备随身手电（M12，默认关闭，需配合 light=True 才有意义）；
-        switches=True 时摆墙边灯开关实体（M19，默认关闭，需配合 light=True 才有意义）。
+        switches=True 时摆墙边灯开关实体（M19，默认关闭，需配合 light=True 才有意义）；
+        boss=True 且 boss_depth 命中当前层时刷绿魔 Boss（M25，默认关闭）。
         """
         return cls(rng=rng, level=generate_level(rng, depth=depth),
                    fov=fov, stealth=stealth, noise=noise, light=light,
-                   flashlight=flashlight, switches=switches)
+                   flashlight=flashlight, switches=switches, boss=boss,
+                   boss_depth=boss_depth)
 
     def load_level(self, level: Level, populate: bool = True) -> None:
         """装载一层程序化楼层：重置地形与实体，**保留**玩家 HP / 背包 / 伤害加成。
@@ -961,31 +1009,42 @@ class Game:
         self.grid[self.py][self.px] = PLAYER
         self.monsters = []
         self.items = []
+        self.boss = None      # M25：新楼层 = 新 Boss 引用（只有最终层会（重）置）
         self.update_fov()  # M6：装载后立刻算一次可见区域
         if populate:
             self._populate_level()
         self._grant_decoy()  # M9：新一层，又随手抄到一个垃圾桶盖（在撒点之后，不抢补给的位置）
         self._place_switches()  # M19：按开关启用状态摆墙边开关（switches_enabled=False ⇒ 不摆）
+        # M25：boss 开启且当前层 == boss_depth ⇒ 刷绿魔（确定性摆位、不消耗 rng，#1/#2 不破）。
+        # 放最后：新一层 = 新 Boss，且摆位基于已生成的 rooms，不与撒点抢随机序列。
+        if self.boss_enabled and self.boss_depth is not None \
+                and self.depth == self.boss_depth:
+            self._spawn_boss()
 
     def _populate_level(self) -> None:
         """按房间撒怪与补给：起始房间不刷怪，留一间房喘息。
 
         有怪的房间（概率 MONSTER_ROOM_PROB）再刷 1~MONSTERS_PER_ROOM_MAX 只，
         于是有的房间空着、有的埋伏两只——楼层整体密度约每两间房一只。
+        M25：最终层且 boss 开启时跳过普通撒怪（那一层只刷绿魔，清场即终局，
+        普通怪的 rng 调用一并省去 ⇒ 更深的玩法不扰动前几层的随机序列，#1/#2 不破）。
         """
         spawnable = [r for r in self.rooms if not r.contains(self.px, self.py)]
-        for room in spawnable:
-            if self.rng.chance(MONSTER_ROOM_PROB):
-                for _ in range(self.rng.int(1, MONSTERS_PER_ROOM_MAX)):
-                    spot = self._free_tile_in(room)
-                    if spot is None:
-                        break
+        boss_final = (self.boss_enabled and self.boss_depth is not None
+                      and self.depth == self.boss_depth)
+        if not boss_final:
+            for room in spawnable:
+                if self.rng.chance(MONSTER_ROOM_PROB):
+                    for _ in range(self.rng.int(1, MONSTERS_PER_ROOM_MAX)):
+                        spot = self._free_tile_in(room)
+                        if spot is None:
+                            break
+                        self._spawn_random_monster(self.depth, *spot)
+            if not self.monsters and spawnable:
+                # 保底：整层至少一只怪，免得生成出「一只怪都没有」的空楼层
+                spot = self._free_tile_in(spawnable[-1])
+                if spot is not None:
                     self._spawn_random_monster(self.depth, *spot)
-        if not self.monsters and spawnable:
-            # 保底：整层至少一只怪，免得生成出「一只怪都没有」的空楼层
-            spot = self._free_tile_in(spawnable[-1])
-            if spot is not None:
-                self._spawn_random_monster(self.depth, *spot)
         for room in self.rooms:
             if self.rng.chance(ITEM_ROOM_PROB):
                 spot = self._free_tile_in(room)
@@ -1012,6 +1071,43 @@ class Game:
         kind = self.rng.choice(unlocked)
         hp = kind.hp + (depth - 1) * MONSTER_HP_PER_DEPTH
         return self.spawn_monster(kind.name, x, y, hp, kind.attack, kind.behavior)
+
+    # ---------- M25 Boss 战（最终层绿魔）----------
+    # 不变量 #1/#2：Boss 摆位**纯几何、零随机**（不消耗 RandomSource）⇒ 不扰动任何随机序列；
+    #   同 seed + 同 depth ⇒ 同位置（确定性）。Boss 只出现在最终层，前几层玩法一字节不变。
+    # 不变量 #8 延伸：本段只读状态、写 self.monsters / self.boss（实体层，与撒怪同性质），不碰 grid。
+    def _free_boss_tile(self, room: "Room") -> tuple[int, int] | None:
+        """房间内确定性地找第一个可站空位（中心优先、否则行优先扫描，不掷骰，#2）。"""
+        candidates = [room.center] + room.tiles()
+        for (x, y) in candidates:
+            if not self.in_bounds(x, y) or self.is_wall(x, y):
+                continue
+            if (x, y) == (self.px, self.py) or (x, y) == self.stairs:
+                continue
+            if self.monster_at(x, y) or self.item_at(x, y):
+                continue
+            return (x, y)
+        return None
+
+    def _spawn_boss(self) -> None:
+        """M25：在最终层确定性地摆下绿魔 Boss（不消耗 RandomSource，#1/#2 不破）。
+
+        摆位：选「离玩家起点曼哈顿距离最远」的房间作决战舞台（遍历顺序固定、严格大于取最远，
+        确定性）；楼层连通（#7）⇒ 该房间必可达。Boss 是 chase 行为、高 HP、攻击压在平衡基线内，
+        半血暴怒（effective_attack，确定性 +1）。只写实体层（self.monsters / self.boss），不碰 grid。
+        """
+        if not self.rooms:
+            return
+        start = (self.px, self.py)
+        far = max(self.rooms,
+                   key=lambda r: abs(r.center[0] - start[0]) + abs(r.center[1] - start[1]))
+        spot = self._free_boss_tile(far)
+        if spot is None:
+            return
+        m = self.spawn_monster(BOSS_NAME, spot[0], spot[1], BOSS_HP, BOSS_ATTACK, "chase")
+        m.boss = True
+        m.home = spot
+        self.boss = m
 
     def can_descend(self) -> bool:
         """是否站在下行楼梯上（固定教学图没有楼梯 ⇒ 恒为 False）。"""
@@ -1461,9 +1557,12 @@ class Game:
     def _monster_glyph(self, m: Monster) -> str:
         """怪物的渲染字形（只读状态，不变量 #8/#10）。
 
-        未察觉 `m` ｜ 听见动静但还没看见你 `~` ｜ 已看见你 `M`。
+        绿魔 Boss 永远是已知威胁 ⇒ 恒画 `B`（与 M/m/~ 区分，M25）；
+        普通怪：未察觉 `m` ｜ 听见动静但还没看见你 `~` ｜ 已看见你 `M`。
         听觉关闭时不会出现 `~`（没人会是 `CAUSE_SOUND`）⇒ 既有断言仍成立。
         """
+        if getattr(m, "boss", False):
+            return BOSS
         if not m.alerted:
             return UNAWARE
         if self.noise_enabled and m.alert_cause == CAUSE_SOUND:
