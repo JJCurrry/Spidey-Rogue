@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from rogue.light import (ROOM_LIGHT_RADIUS, PLAYER_GLOW_RADIUS, FLASHLIGHT_RADIUS,
                          LIGHT_LEVEL_DARK, LIGHT_LEVEL_DIM, LIGHT_LEVEL_LIT,
                          light_field, monster_sight_radius)
-from rogue.fov import SIGHT_RADIUS, visible_tiles
+from rogue.fov import SIGHT_RADIUS, MONSTER_SIGHT_RADIUS, visible_tiles
 from rogue.game import Game
 from rogue.level import Level, Room
 from rogue.rng import RandomSource
@@ -176,17 +176,48 @@ class TestUpdateFovUsesFullField(unittest.TestCase):
         self.assertNotEqual(g.visible, visible_ambient)   # 完整场比环境场多照亮近处
 
 
-class TestMonsterPerceptionUnchanged(unittest.TestCase):
-    """M11 怪物感知仍走完整场（light_level_at）→ 不变量 #9 硬性质不破、行为零回归。"""
+class TestMonsterPerceptionUsesAmbientExcludingGlow(unittest.TestCase):
+    """M18：M11 怪物感知改用「怪物感知光场」——仅房间灯 + 手电，**不含玩家被动微光**。
 
-    def test_monster_sight_uses_full_field_radius(self):
+    修正 M11 的隐性副作用：玩家被动微光原会照亮附近暗处的怪、使其感知半径不被缩短
+    （等于把近视眼照成远视眼）。现在怪物感知只承认「房间灯 + 手电」，
+    被动微光不再替暗处的怪点灯 ⇒ 暗处怪仍是近视眼、你更难被发现。
+    不变量 #9 硬性质不破（半径仍只缩短不放大、恒 ≤ MONSTER_SIGHT_RADIUS）。
+    """
+
+    def test_monster_sight_excludes_passive_glow(self):
         g = _make(_MAP_A, rooms=(_ROOM_A,), start=(5, 1), light=True)
-        # 走廊近处(6,1)在完整场被微光照亮 ⇒ 该格的怪物感知半径应取「明亮」档（最大）
-        lvl = g.light_level_at(6, 1)
-        self.assertEqual(monster_sight_radius(lvl), 7)    # MONSTER_SIGHT_RADIUS
-        # 同一格若只用环境场则是全黑 ⇒ 半径会缩短；确认我们没把怪物感知切到环境场
-        self.assertNotEqual(monster_sight_radius(g.ambient_level_at(6, 1)),
-                            monster_sight_radius(lvl))
+        # 走廊近处(6,1)：完整场被玩家微光照亮（明亮），但怪物感知光场排除微光 ⇒ 全黑
+        self.assertEqual(g.light_level_at(6, 1), LIGHT_LEVEL_LIT)          # 完整场：微光照亮
+        self.assertNotEqual(g.ambient_level_at(6, 1), LIGHT_LEVEL_LIT)    # 环境场（仅房间灯）：隔墙不照到
+        # 怪物感知改用「怪物感知光场」= 房间灯 + 手电（不含微光）⇒ 走廊近处仍按环境场走（暗）
+        self.assertEqual(g.monster_light_level_at(6, 1), g.ambient_level_at(6, 1))
+        self.assertEqual(monster_sight_radius(g.monster_light_level_at(6, 1)),
+                         monster_sight_radius(g.ambient_level_at(6, 1)))
+        # 关键回归点：怪物感知**不再**等于完整场——确认我们确实把被动微光排除了
+        self.assertNotEqual(
+            monster_sight_radius(g.monster_light_level_at(6, 1)),
+            monster_sight_radius(g.light_level_at(6, 1)))
+
+    def test_monster_sight_includes_flashlight(self):
+        # 手电是「主动光」，保留在怪物感知光场里：玩家打灯后走廊近处被照亮 ⇒ 怪物感知取明亮档
+        g = _make(_MAP_A, rooms=(_ROOM_A,), start=(5, 1), light=True, flashlight=True)
+        g.px, g.py = 5, 1
+        g.update_fov()                                   # 手电点亮 ⇒ 重算怪物感知光场
+        # 距玩家 1 格的 (6,1) 被手电（半径 6）照到 ⇒ 贡献 5 ≥ 明亮阈值 ⇒ 明亮（满半径）
+        self.assertEqual(g.monster_light_level_at(6, 1), LIGHT_LEVEL_LIT)
+        self.assertEqual(monster_sight_radius(g.monster_light_level_at(6, 1)),
+                         MONSTER_SIGHT_RADIUS)
+        # 距玩家 4 格的 (9,1) 手电贡献 2 ⇒ 昏暗（半径 4），证明手电随距离衰减（只缩短不放大）
+        self.assertEqual(g.monster_light_level_at(9, 1), LIGHT_LEVEL_DIM)
+        self.assertEqual(monster_sight_radius(g.monster_light_level_at(9, 1)), 4)
+
+    def test_monster_field_includes_room_light(self):
+        # 房间内(2,1)有房间灯 ⇒ 怪物感知光场（含房间灯）明亮 ⇒ 满半径
+        g = _make(_MAP_A, rooms=(_ROOM_A,), start=(5, 1), light=True)
+        self.assertEqual(g.monster_light_level_at(2, 1), LIGHT_LEVEL_LIT)
+        self.assertEqual(monster_sight_radius(g.monster_light_level_at(2, 1)),
+                         MONSTER_SIGHT_RADIUS)
 
 
 if __name__ == "__main__":

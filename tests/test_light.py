@@ -150,12 +150,19 @@ class TestLightAwareness(unittest.TestCase):
         g.update_fov()
         self.assertTrue(g.monster_can_see_player(m))
 
-    def test_player_glow_lights_nearby_monster(self):
-        # 无房间、怪在玩家微光半径内（距离 3）⇒ 被照亮（至少昏暗）⇒ 看得清
+    def test_passive_glow_does_not_light_monster(self):
+        # M18：玩家被动微光**不再**照亮暗处怪——无房间、无手电、怪在微光半径内（距离 3）
+        # ⇒ 怪所在格在怪物感知光场里仍是全黑（被动微光被排除）⇒ 半径缩短为 2 < 3 ⇒ 看不见
         g = _make(_LONG, light=True)
         g.px, g.py = 1, 1
         g.update_fov()
         m = g.spawn_monster("街头小混混", 4, 1, hp=8, behavior="chase")
+        self.assertEqual(g.monster_light_level_at(4, 1), LIGHT_LEVEL_DARK)
+        self.assertFalse(g.monster_can_see_player(m))
+        # 但主动打出手电（半径 6）会照亮距离 3 处 ⇒ 该怪看得见你（手电是主动光，保留 M12 双刃）
+        g.flashlight_on = True
+        g.update_fov()
+        self.assertEqual(g.monster_light_level_at(4, 1), LIGHT_LEVEL_LIT)
         self.assertTrue(g.monster_can_see_player(m))
 
     def test_monster_in_lit_room_full_radius(self):

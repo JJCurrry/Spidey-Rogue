@@ -263,12 +263,16 @@ class Game:
         self.last_noise_loudness = 0    # 上一次发声的响度（0 = 还没发出过动静）
         self.last_noise_heard = 0       # 上一次动静惊动了几只敌人（供演示读取）
         # M11 光照状态：light_enabled 是光照开关；
-        #   light_field    = 完整光照场（房间灯 + 玩家微光 + 随身手电），用于渲染梯度 / M11 怪物感知 / M13 玩家视野；
+        #   light_field    = 完整光照场（房间灯 + 玩家微光 + 随身手电），用于渲染梯度 / M13 玩家视野；
         #   ambient_field  = 环境光照场（仅房间灯，不含玩家微光与手电），M17 新增——把「静态环境照明」与
         #                     「玩家随身光源」拆开，便于未来按需对二者分别取用（如让某判定只看环境光）。
+        #   monster_light_field = M18 怪物感知光场（仅房间灯 + 随身手电，**不含玩家被动微光**）；
+        #                    用于 M11 怪物感知半径判定，修正「玩家被动微光把附近暗处怪照成近视眼反面」的隐性副作用
+        #                    （你的微光不该帮暗处的怪看清你）。
         self.light_enabled = light
         self.light_field: dict[tuple[int, int], int] = {}
         self.ambient_field: dict[tuple[int, int], int] = {}
+        self.monster_light_field: dict[tuple[int, int], int] = {}
         # M12 随身手电状态：flashlight_enabled 是「是否装备手电」的开关（opt-in，默认关闭）；
         # flashlight_on 是当前是否点亮（默认与装备状态一致：装备即点亮，玩家可随时 toggle）。
         self.flashlight_enabled = flashlight
@@ -645,7 +649,9 @@ class Game:
             return False
         radius = MONSTER_SIGHT_RADIUS
         if self.light_enabled:
-            radius = monster_sight_radius(self.light_level_at(m.x, m.y))
+            # M18：怪物感知走「怪物感知光场」（房间灯 + 手电，**不含玩家被动微光**），
+            # 修正「被动微光把附近暗处怪照成近视眼反面」的隐性副作用——你的微光不该帮暗处的怪看清你。
+            radius = monster_sight_radius(self.monster_light_level_at(m.x, m.y))
         return monster_can_see(self.grid, (m.x, m.y), (self.px, self.py),
                                radius, self.rooms)
 
@@ -1058,21 +1064,42 @@ class Game:
                 if r.center not in self.switched_lights
                 and r.center not in self.destroyed_lights]
 
+    def _monster_light_sources(self) -> list[tuple[int, int, int]]:
+        """M18：怪物感知光源列表（房间中心固定灯 + 随身手电，**不含玩家被动微光**）。
+
+        与 _light_sources 的唯一差别是「不追加玩家被动微光（PLAYER_GLOW_RADIUS）」——
+        它代表「环境照明 + 你主动打出的手电」，但**不是**你身上那层永远在的被动微光。
+        修正 M11 的隐性副作用：玩家被动微光原会照亮附近暗处的怪、使其感知半径不被缩短
+        （等于把近视眼照成远视眼）；现在怪物感知只承认「房间灯 + 手电」，
+        被动微光不再替暗处的怪点灯 ⇒ 暗处怪仍是近视眼、你更难被发现（#9 对称硬性质不破，
+        因为半径仍只缩短不放大、恒 ≤ MONSTER_SIGHT_RADIUS）。
+        switched_lights / destroyed_lights 同样跳过（关灯 / 碎灯只移除光源、不新增
+        ⇒ monster_light_field 只变暗或恢复，#12/#15/#16 不破）。
+        """
+        sources = self._ambient_sources()
+        if self.flashlight_on:
+            sources.append((self.px, self.py, FLASHLIGHT_RADIUS))
+        return sources
+
     def update_light(self) -> None:
         """重算逐格光照场（纯几何、零随机，不变量 #1/#2/#8）。
 
         M17：同时算两份——
-          ambient_field = 仅房间灯（静态环境照明）；
-          light_field   = 完整场（房间灯 + 玩家微光 + 手电）。
-        两份同源、幂等；默认所有消费点走 light_field（完整场）⇒ 行为零回归。
-        光照关闭时两份都清空（任何查询都按「全亮」处理，不改变任何行为）。
+          ambient_field       = 仅房间灯（静态环境照明）；
+          light_field         = 完整场（房间灯 + 玩家微光 + 手电）；
+          monster_light_field = 怪物感知光场（房间灯 + 手电，**不含玩家被动微光**，M18 新增）。
+        三份同源、幂等；M11 怪物感知 / M13 玩家视野 / 渲染的「完整场」消费点不变（零回归），
+        但 M11 怪物感知半径判定自 M18 起改走 monster_light_field（排除被动微光）。
+        光照关闭时三份都清空（任何查询都按「全亮」处理，不改变任何行为）。
         """
         if not self.light_enabled:
             self.light_field = {}
             self.ambient_field = {}
+            self.monster_light_field = {}
             return
         self.ambient_field = light_field(self.grid, self._ambient_sources())
         self.light_field = light_field(self.grid, self._light_sources())
+        self.monster_light_field = light_field(self.grid, self._monster_light_sources())
 
     def light_level_at(self, x: int, y: int) -> int:
         """(x,y) 的完整光照等级（房间灯 + 玩家微光 + 手电）；光照关闭时恒为「明亮」（不影响任何行为，#8/#9）。
@@ -1091,6 +1118,17 @@ class Game:
         if not self.light_enabled:
             return LIGHT_LEVEL_LIT
         return self.ambient_field.get((x, y), LIGHT_LEVEL_DARK)
+
+    def monster_light_level_at(self, x: int, y: int) -> int:
+        """M18：(x,y) 的**怪物感知**光照等级（仅房间灯 + 随身手电，不含玩家被动微光）。
+
+        与 light_level_at 对称：光照关闭时恒为「明亮」（不改变任何行为，#8/#9）。
+        只供 M11 怪物感知半径判定消费——修正「被动微光替暗处怪点灯」的隐性副作用；
+        M13 玩家视野仍走完整场 light_field（含微光，按目标格光照算），不受此影响（#14 不破）。
+        """
+        if not self.light_enabled:
+            return LIGHT_LEVEL_LIT
+        return self.monster_light_field.get((x, y), LIGHT_LEVEL_DARK)
 
     def toggle_flashlight(self) -> bool:
         """开关随身手电（M12，纯状态操作、不消耗 RandomSource、不改写任何玩法状态，#13）。

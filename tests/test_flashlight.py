@@ -157,11 +157,11 @@ class TestFlashlightPerception(unittest.TestCase):
         g.px, g.py = 1, 1
         g.update_fov()
         m = g.spawn_monster("街头小混混", 6, 1, hp=8, behavior="chase")
-        # 直接验证：被手电照亮 ⇒ 半径 = 满值，但仍 ≤ MONSTER_SIGHT_RADIUS
+        # 直接验证（走怪物感知光场）：被手电照亮 ⇒ 半径 = 满值，但仍 ≤ MONSTER_SIGHT_RADIUS
         radius = MONSTER_SIGHT_RADIUS
         if g.light_enabled:
             from rogue.light import monster_sight_radius
-            radius = monster_sight_radius(g.light_level_at(m.x, m.y))
+            radius = monster_sight_radius(g.monster_light_level_at(m.x, m.y))
         self.assertLessEqual(radius, MONSTER_SIGHT_RADIUS)
 
 
