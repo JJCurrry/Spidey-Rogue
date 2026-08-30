@@ -64,20 +64,71 @@ def _parse_flags(argv: list[str]) -> dict:
     return flags
 
 
+def _status(msg: str) -> None:
+    """把进度写到 pygbag 的 infobox（浏览器可见的绿框）与 Python stdout（绿色终端框）。"""
+    print("[web] " + msg)
+    try:
+        import platform as _plat
+        win = getattr(_plat, "window", None)
+        if win is not None:
+            box = getattr(win, "infobox", None)
+            if box is not None:
+                box.style.display = "block"
+                box.style.whiteSpace = "pre-wrap"
+                box.style.background = "green"
+                box.style.color = "white"
+                box.innerText = msg
+    except Exception:
+        pass
+
+
+def _show_error(msg: str) -> None:
+    """把启动错误以「红底白字」强制显示到 pygbag 的 infobox（浏览器可见），避免静默灰屏。"""
+    print("WEB_BOOT_ERROR:", msg)
+    try:
+        import platform as _plat
+        win = getattr(_plat, "window", None)
+        if win is not None:
+            box = getattr(win, "infobox", None)
+            if box is not None:
+                box.style.display = "block"
+                box.style.whiteSpace = "pre-wrap"
+                box.style.background = "#a01010"   # 红底，强提示
+                box.style.color = "white"
+                box.innerText = "游戏启动失败（请把这段贴给开发者）：\n\n" + msg
+    except Exception:
+        pass
+
+
 async def main() -> None:
+    _status("① 正在生成程序化楼层（Game.procedural）…")
     flags = _parse_flags(sys.argv[1:])
     rng = RandomSource(seed=SEED)
     game = Game.procedural(rng, depth=1, fov=flags["fov"], stealth=flags["stealth"],
                            noise=flags["noise"], light=flags["light"],
                            flashlight=flags["flashlight"], switches=flags["light"],
                            boss=flags["boss"], boss_depth=MAX_DEPTH)
+    _status("② 楼层就绪，准备存档后端（localStorage / 文件回退）…")
     # 让 --play 路径的 S/L 存档走 M29 后端：浏览器用 localStorage、桌面回退文件
     _main.SAVE_BACKEND = get_default_backend(_save_path())
+    _status("③ 创建 PygameRenderer（pygame.init + set_mode + 字体 + 音效）…")
     renderer = PygameRenderer(game, cell_size=26, max_depth=MAX_DEPTH,
                               help_text=CONTROLS_HELP)
+    _status("④ 渲染器就绪，立即绘制首帧 splash…")
+    try:
+        renderer.splash("蜘蛛侠·纽约暗夜 加载中…")
+    except Exception:
+        import traceback as _tb
+        _show_error("首帧绘制失败：\n" + _tb.format_exc())
+        raise
+    _status("⑤ 进入异步主循环（async_run）。点击页面即可操作蜘蛛侠。")
     ending = await renderer.async_run(_handle_key)
     print("游戏结束：", ending)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except Exception:
+        import traceback
+        _show_error(traceback.format_exc())

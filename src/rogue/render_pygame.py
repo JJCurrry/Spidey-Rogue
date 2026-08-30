@@ -46,7 +46,21 @@ import math
 import os
 import pathlib
 import sys
-import wave
+# wave 模块懒导入（pygbag/WASM 环境默认不包含，运行时 pip 安装；
+# 懒导入保证模块加载不崩、缺 wave 时音效静默降级）。
+_wave_module = None
+
+
+def _get_wave():
+    """返回 wave 模块；不可用时返回 None（调用方自行降级）。"""
+    global _wave_module
+    if _wave_module is None:
+        try:
+            import wave as _w
+            _wave_module = _w
+        except Exception:
+            pass
+    return _wave_module
 
 # M27：序列帧 Sprite 目录（仓库根 tiles/）。渲染层优先从这里的 *.png 加载，
 # 缺文件时回退到同款程序化绘制（与 M24 视觉零差异、确定性不变）。
@@ -144,6 +158,9 @@ def _bag_str(game) -> str:
 # ---- 音频合成（纯内存 wave，无外部素材；懒初始化、失败静默）----
 def _synth_buffer(segments: list[tuple]) -> bytes:
     """把若干 (f0, f1, dur, vol, up) 扫频段拼接成 16-bit PCM 字节流。纯函数。"""
+    wave_mod = _get_wave()
+    if wave_mod is None:
+        return b""  # 无 wave 模块时返回静音（调用方 _init_audio 会将 sound_on 置 False）
     rate = 22050
     buf = array.array("h")
     for (f0, f1, dur, vol, up) in segments:
@@ -157,7 +174,7 @@ def _synth_buffer(segments: list[tuple]) -> bytes:
             v = 1.0 if s >= 0 else -1.0
             buf.append(int(32767 * vol * env * v))
     out = io.BytesIO()
-    w = wave.open(out, "wb")
+    w = wave_mod.open(out, "wb")
     w.setnchannels(1)
     w.setsampwidth(2)
     w.setframerate(rate)
@@ -389,6 +406,10 @@ class PygameRenderer:
     def _init_audio(self) -> None:
         if not self.sound_on:
             return
+        # pygbag/WASM 默认无 wave 模块：缺则直接静音降级，不触发运行时 pip 下载、不崩。
+        if _get_wave() is None:
+            self.sound_on = False
+            return
         try:
             if not pygame.mixer.get_init():
                 pygame.mixer.init(frequency=22050, size=-16, channels=1, buffer=512)
@@ -582,6 +603,22 @@ class PygameRenderer:
         self._prev_px, self._prev_py = game.px, game.py
         self._prev_hp = getattr(game, "player_hp", 0)
         self.frame += 1
+        pygame.display.flip()
+
+    def splash(self, text: str) -> None:
+        """首帧启动画面：强制填充不透明底色 + 标题文字并 flip，用于确认 canvas 可见。
+
+        在 WASM/pygbag 下若连 splash 都画不出来，说明 canvas 根本没呈现（环境问题），
+        而不是游戏逻辑崩了——此时仍能从异常路径拿到报错。
+        """
+        self.screen.fill((18, 18, 30))
+        try:
+            title = self.big_font.render("SPIDER-MAN", True, (255, 255, 255))
+            self.screen.blit(title, (24, 24))
+            sub = self.font.render(text, True, (220, 220, 235))
+            self.screen.blit(sub, (24, 70))
+        except Exception:
+            pass
         pygame.display.flip()
 
     def _frame_tile(self, frames: list, gx: int, gy: int) -> pygame.Surface:
@@ -1057,6 +1094,7 @@ class PygameRenderer:
         self._hk = handle_key
         clock = pygame.time.Clock()
         self.draw()
+        err = None
         try:
             while True:
                 res = self._pump_events(handle_key)
@@ -1070,8 +1108,15 @@ class PygameRenderer:
                 self.draw()
                 clock.tick(fps)
                 await asyncio.sleep(0)
+        except Exception as _e:
+            # 异常向上抛给 web.py 顶层 try（显示到浏览器 infobox），
+            # 不在此 pygame.quit()，保留最后一帧画面，避免把错误清成灰屏。
+            err = _e
+            raise
         finally:
-            pygame.quit()
+            # 仅在正常结束（return）时退出 pygame；异常路径保留画面以便排查。
+            if err is None:
+                pygame.quit()
 
     async def _wait_key_async(self) -> None:
         """异步版「等任意键」：结局横幅已画出后，等玩家按键再返回（不阻塞 wasm 线程）。"""
