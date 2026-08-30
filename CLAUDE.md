@@ -32,12 +32,13 @@
 - M15 怪物追击修正与攻击配平（已完成，见 `docs/工单/T-015-怪物追击修正.md` / `docs/adr/ADR-011-怪物追击修正与配平.md`）：M3 老追击路径 `_step_toward` 改用切比雪夫二次关键字（close_in=True），修掉玩家轴向往复时怪锁轴震荡、永不贴上的 bug，与潜行分支统一；威胁上升故怪物攻击各降 1（1~3 → 0~2）配平——只修不配平 26/30→22/30，配平后默认 30/30 / 潜行 28/30；纯几何零随机（#2 不变）、默认追击行为预期改变（核心玩法修正）
 - M16 可破坏的房间灯（已完成，见 `docs/工单/T-016-可破坏的房间灯.md` / `docs/adr/ADR-012-可破坏的房间灯.md`）：在 M14 翻转式灯开关之上加「蛛网射碎灯泡，一次性不可逆」——新增 `destroyed_lights` 集合 + `can_destroy_light`/`destroy_light`（纯几何、零随机、默认关闭、换层重置）；`_light_sources` 同时跳过 `switched_lights` 与 `destroyed_lights`（只移除光源、不新增 ⇒ #9/#12/#14 不破）；已碎灯不可再 toggle、可作用于已关灯房间 ⇒ 永久黑暗；碎裂轻响 `NOISE_SHATTER_BULB=3` 从灯处传出（调虎离山）；测试 432 例全绿（不变量 #16）
 - M17 环境光照场与完整光照场分离（已完成，见 `docs/工单/T-017-环境光照场分离.md` / `docs/adr/ADR-013-环境光照场分离.md`）：`update_light()` 同源、幂等重算两份场——`ambient_field`（仅房间灯，不含玩家微光/手电，静态环境照明）与 `light_field`（房间灯 + 微光 + 手电，完整场）；新增 `_ambient_sources` 与只读查询 `ambient_level_at`（与 `light_level_at` 对称，光照关闭恒「明亮」）；**默认所有玩法/渲染判定仍走完整场** ⇒ 行为零回归（gate 432 → 443，演示逐字节一致，不变量 #17）
-- M18 怪物感知改用环境场（已完成，见 `docs/工单/T-018-怪物感知改用环境场.md` / `docs/adr/ADR-014-怪物感知改用环境场.md`）：M11 怪物感知半径判定从完整场 `light_level_at` 改走「怪物感知光场」`monster_light_level_at`（**仅房间灯 + 随身手电，不含玩家被动微光**），修正「被动微光把附近暗处怪照成近视眼反面」的隐性副作用；新增 `_monster_light_sources` / `monster_light_field` / `monster_light_level_at`，由 `update_light()` 同源、幂等重算；有效半径恒 ≤ `MONSTER_SIGHT_RADIUS` ⇒ #9 对称硬性质不破、手电双刃（M12）保留；`light=False` 三条演示与 M17 逐字节一致，`--light`/`--flashlight` 演示仍通关（gate 443 → 445，不变量 #18）
-- 下一步候选（M18 已完成「怪物感知改用环境场」；剩余两条待立项）：让光照也影响蜘蛛感应半径（SPIDER_SENSE_RADIUS=4 穿墙预警目前不受光照约束；主题上是否该受光照约束需先定调）；灯开关独立实体（墙上开关 tile，需新实体类型 + 新渲染字形）
+- M18 怪物感知改用环境场（已完成，见 `docs/工单/T-018-怪物感知改用环境场.md` / `docs/adr/ADR-014-怪物感知改用环境场.md`）：M11 怪物感知半径判定从完整场 `light_level_at` 改走「怪物感知光场」`monster_light_level_at`（**仅房间灯 + 随身手电，不含玩家被动微光**），修正「被动微光把附近暗处怪照成近视眼反面」的隐性副作用；新增 `_monster_light_sources` / `monster_light_field` / `monster_light_level_at`，由 `update_light()` 同源、幂等重算；有效半径恒 ≤ `MONSTER_SIGHT_RADIUS` ⇒ #9 对称硬性质不破、手电双刃（M12）保留；`light=False` 三条演示与 M17 逐字节一致、`--light`/`--flashlight` 演示仍通关（gate 443 → 445，不变量 #18）
+- M19 灯开关独立实体（已完成，见 `docs/工单/T-019-灯开关独立实体.md` / `docs/adr/ADR-015-灯开关独立实体.md`）：墙边开关 `LightSwitch` 实体与天花板灯具 `room.center` 分离的独立控制手柄；**保留 M14 `toggle_light` / M16 `destroy_light` API 不动**，平行新增 switch API（`switch_at` / `can_toggle_switch` / `toggle_switch` / `can_destroy_switch` / `destroy_switch` / `switch_light_is_on`，纯几何零随机、默认关闭）翻同一份 `switched_lights`/`destroyed_lights`（按 `room.center` 记录）⇒ 完全复用 M14/M16 光照场逻辑、行为零回归；几何约束瞄准「开关格」的 `has_line_of_sight` + 切比雪夫 ≤ `WEB_LIGHT_RANGE`；声源仍在灯具处（`NOISE_TOGGLE_LIGHT=3` / `NOISE_SHATTER_BULB=3` 从 `room.center` 传出，M8 调虎离山成立）；`main.py` 设 `switches=light`，`--light --stealth` 下 `step 0b` 改为蛛网射碎未察觉敌人所在房间**墙边开关**的灯泡（永夜摸黑接近，行为等价于 M18 射碎灯具）；`render()` 全图/迷雾画 `=`、已碎退回 `#`、不改写 world state（#8 延伸）；opt-in（`switches=False` ⇒ 默认/潜行/听觉三条演示与 M18 逐字节一致）；测试 445 例 → 478 例全绿（不变量 #19）
+- 下一步候选（M19 已完成「灯开关独立实体」；剩余一条待立项）：让光照也影响蜘蛛感应半径（SPIDER_SENSE_RADIUS=4 穿墙预警目前不受光照约束；主题上是否该受光照约束需先定调）
 
 ## 七件套索引（只放指针）
 - ① 本文档（根索引）
-- ② 工单：`docs/工单/T-001-格子与移动.md` … `docs/工单/T-014-可开关的房间灯.md`
+- ② 工单：`docs/工单/T-001-格子与移动.md` … `docs/工单/T-019-灯开关独立实体.md`
 - ③ 接力：`docs/接力/HANDOFF-T001.md`（含 commit + 下一步；**全程只有这一根棒**，勿按里程碑新建）
 - ④ ADR：`docs/adr/ADR-001-技术选型.md`、`docs/adr/ADR-002-视野与渲染层.md`、
   `docs/adr/ADR-003-怪物感知与潜行.md`、`docs/adr/ADR-004-噪音与听觉.md`、
