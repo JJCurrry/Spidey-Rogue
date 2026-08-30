@@ -37,11 +37,13 @@
 - M20 光照影响蜘蛛感应半径（已完成，见 `docs/工单/T-020-光照影响蜘蛛感应半径.md` / `docs/adr/ADR-016-光照影响蜘蛛感应半径.md`）：M6 的蜘蛛感应（穿墙预警 `?`）半径原本恒为 `SPIDER_SENSE_RADIUS=4`、不受光照约束；M20 起 `light=True` 时按怪物所在格光照衰减（暗 2 / 昏暗 3 / 明 4），与 M11 怪物感知、M13 玩家视野形成「黑暗三重削弱」对称；纯几何、零随机、`fov.spider_sense_radius` 只缩短不放大、恒 ≤ 4；默认关闭（`light=False` ⇒ 半径恒 4，与 M1~M19 逐字节一致）；暗处保留最小半径 2 避免彻底无预警；`render()` 字形一字不差（#8 延伸）；测试 478 例 → 506 例全绿（不变量 #20）
 - M21 可键盘操作玩法（已完成，见 `docs/工单/T-021-可键盘操作玩法.md` / `docs/adr/ADR-017-可键盘操作玩法.md`）：把「只能看脚本自动驾驶 demo」变成「能自己上手玩、开发中可实测」——`main.py` 新增 `_handle_key`（按键→动作，撞怪即攻击 bump-to-attack、`g` 拾取、`1~5` 用道具、`e` 蛛网摆荡突袭、`f` 手电、`>` 下潜、空格/`.`/回车等待、`?` 帮助、`q` 退出）+ `_player_interactive`（渲染→读键→执行→怪物回合，判定 win/dead/quit）+ `main()` 的 `--play` 开关（默认仍走 `_player_act` 自动驾驶 demo，零回归）；纯几何、零随机（只调 Game 既有方法）、move 保持 4 向（#4）、有效动作耗回合/无效键不耗（#2）、操作说明内置；测试 506 例 → 521 例全绿（不变量 #21）
 - M22 Pygame GUI 渲染层（已完成，见 `docs/工单/T-022-GUI渲染层.md` / `docs/adr/ADR-018-GUI渲染层.md`）：把「ASCII 终端视图」换成「真实 Pygame 窗口」——新增 `src/rogue/render_pygame.py` 的 `PygameRenderer`（只读 `Game` 公开状态、逐帧画窗口、主循环 `run(_handle_key)` 与 `--play` 终端路径同构），`main.py` 新增 `--gui` 开关（延迟 import，opt-in），`--play` 终端模式保留作 headless 回归基线；引入首个第三方依赖 `pygame`（`requirements.txt`）；纯几何零随机、不改 `Game` 一字（#1/#2/#8 延伸），GUI 与终端对同 seed+同输入序列产生同结果（#2，机器判定 `tests/test_gui.py`）；测试 521 例 → 533 例全绿（不变量 #22）
-- 下一步候选（M22 已完成「Pygame GUI 渲染层」，游戏从 ASCII 终端变成真实窗口；M21 的交互控制 + M22 的窗口渲染已闭环「能手动玩」）：如需新里程碑，按流程在 `docs/工单/` + `docs/adr/` + `docs/不变量.md`（#1–#22）登记后再开工。候选方向：① **GUI 美术升级（M23）**：把纯色块换成 Spider-Man 主题 Sprite 贴图（`tiles/*.png`）+ 攻击/移动动画 + 音效，`tile_color` 字形→RGB 映射点改为字形→surface 即可，核心零改动；② 交互式射灯/碎灯/墙边开关的目标选择 UI（M14/M16/M19 的玩家可控版）；③ 存档/读档（save/load）；④ Boss 战与胜利条件闭环；⑤ 更多蜘蛛侠招式（AoE 蛛网束缚 / 可指定落点摆荡位移）；⑥ 网页化（Pygbag 把 Pygame 打包成 wasm，零改核心）。
+- M23 Spider-Man 主题化 GUI 渲染（已完成，见 `docs/工单/T-023-主题化GUI渲染.md` / `docs/adr/ADR-019-主题化GUI渲染.md`）：把 M22 的纯色块升级为**程序化蜘蛛侠主题**——玩家画面具（红底+黑蛛网+白眼）、蛛网地板/纽约砖墙贴图、怪物 `M/m/~` 与道具按 key 主题图标、蜘蛛感应红色脉冲、攻击蛛网特效+命中白闪、合成音效（thwip/闷响，懒初始化静默）、主题 HUD；美术**全程序化、零素材依赖**；红线不变（只读 Game、零随机、不改 `Game` 一字）；`tile_color`/`pixel_pos`/`translate_key` 行为不变；`tests/test_gui.py` 12 例 → 20 例、gate 533 例 → 541 例全绿（不变量 #23）
+- M24 Spider-Man 主题美术再升级 · 动画 + 美术 + 音效（进行中，见 `docs/工单/T-024-美术动画升级.md` / `docs/adr/ADR-020-美术动画升级.md`）：在 M23 程序化美术上叠加**帧动画**（地形多帧微动、玩家呼吸/突进/受击红闪、怪物浮动/眨眼、蛛网行进+火花迸发、蜘蛛感应扩散环、暗角+开灯光晕）与**音效升级**（脚步/摆荡 whoosh/感应刺痛/胜负 stings），全部 `self.frame` 计数器驱动、零随机、纯视图状态；`tile_color`/`pixel_pos`/`translate_key`/`apply_keys` 契约不变；红线不变（#1/#2/#8 延伸）；`--gui` 仍 opt-in（不变量 #24）
+- 下一步候选（M23 主题化 + M24 动画/音效均已推进「能玩且像活的蜘蛛侠」）：① 交互式射灯/碎灯/墙边开关的目标选择 UI（M14/M16/M19 的玩家可控版）；② 存档/读档（save/load）；③ Boss 战与胜利条件闭环；④ 更多蜘蛛侠招式（AoE 蛛网束缚 / 可指定落点摆荡位移）；⑤ 主题美术换 `tiles/*.png` 序列帧 Sprite（预渲染已按帧组织，接口已留好）；⑥ 网页化（Pygbag 把 Pygame 打包成 wasm，零改核心）。
 
 ## 七件套索引（只放指针）
 - ① 本文档（根索引）
-- ② 工单：`docs/工单/T-001-格子与移动.md` … `docs/工单/T-019-灯开关独立实体.md`
+- ② 工单：`docs/工单/T-001-格子与移动.md` … `docs/工单/T-024-美术动画升级.md`
 - ③ 接力：`docs/接力/HANDOFF-T001.md`（含 commit + 下一步；**全程只有这一根棒**，勿按里程碑新建）
 - ④ ADR：`docs/adr/ADR-001-技术选型.md`、`docs/adr/ADR-002-视野与渲染层.md`、
   `docs/adr/ADR-003-怪物感知与潜行.md`、`docs/adr/ADR-004-噪音与听觉.md`、

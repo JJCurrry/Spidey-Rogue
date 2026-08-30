@@ -1,4 +1,4 @@
-"""Pygame GUI 渲染层（M22 骨架 · M23 Spider-Man 主题化）。
+"""Pygame GUI 渲染层（M22 骨架 · M23 Spider-Man 主题化 · M24 动画+美术+音效）。
 
 把 ASCII 视图层（Game.render() + color.py）替换为真实窗口渲染。
 铁律（与 color.py 同源，红线不被触碰）：
@@ -8,7 +8,7 @@
 - 地形底取自 `game.grid`（墙/地板），实体/特征取自 `game.render()` 字形
   （迷雾可见性门控 + 渲染优先级 `?`<`>`<`!`<`M`<`@` 全由它管），零漂移；
 - 主循环只做「事件→按键 token→handle_key(game,token)→(acted? monster_turn)→draw」，
-  与 main.py 的 --play 终端路径逐字节同构 ⇒ 同 seed+同输入序列 ⇒ 同结果（#2）。
+  与 main.py 的 --play 终端路径逐字节同构 ⇒ 同 seed+同输入序列⇒同结果（#2）。
 
 M23 主题化（HANDOFF 预留的「Sprite/动画/音效」）：
 - 预渲染主题贴图（蛛网地板 / 纽约砖墙 / 近黑未探索），按可见性双版；
@@ -17,13 +17,24 @@ M23 主题化（HANDOFF 预留的「Sprite/动画/音效」）：
 - 攻击生成淡出蛛网特效 + 命中白闪（renderer 自身视图状态，不回写 Game）；
 - 合成音效（蛛网 thwip / 命中闷响），懒初始化、失败静默、不碰游戏状态；
 - 主题化 HUD（红蓝标题条 + 蛛网分隔 + 红色血条 + 背包格）。
+
+M24 动画 + 美术 + 音效升级（T-024 / ADR-020 / 不变量 #24）：
+- 动画全部由 renderer 的 `self.frame` 计数器驱动（每帧 +1，纯几何、零随机）；
+- 地形多帧预渲染（蛛网轻闪 / 砖缝呼吸）；
+- 玩家待机呼吸 / 攻击突进 / 受击红闪；怪物待机浮动 + 眨眼；
+- 攻击蛛网行进 + 命中火花迸发；蜘蛛感应扩散同心环；
+- 氛围层：暗角 vignette + 开灯房间光晕；
+- 音效升级：脚步 / 摆荡 whoosh / 感应刺痛 / 胜负 stings（全程序化合成、懒初始化、失败静默）。
 纯几何、零随机、确定性（不变量 #2 精神）。
 """
 from __future__ import annotations
 
+import array
+import io
 import math
 import os
 import sys
+import wave
 
 # pygame 在模块顶部 import：headless 测试用 SDL_VIDEODRIVER=dummy 加载；
 # main.py 只在 --gui 分支 import 本模块，故 gate 不传 --gui 时不强制 pygame。
@@ -69,6 +80,7 @@ ITEM_TINT: dict[str, tuple[int, int, int]] = {
 }
 
 HUD_HEIGHT = 150
+LIGHT_LIT = 2                       # src/rogue/light.py: LIGHT_LEVEL_LIT
 DEFAULT_HELP = (
     "WASD/方向键 移动（撞怪=攻击） · G 拾取 · 1-5 用道具\n"
     "E 蛛网摆荡突袭 · F 手电 · > 下潜 · 空格/回车 等待\n"
@@ -113,7 +125,32 @@ def _bag_str(game) -> str:
     return "、".join(f"{i}:{it.name}" for i, it in enumerate(game.inventory))
 
 
-# ---- 预渲染贴图（M23）----
+# ---- 音频合成（纯内存 wave，无外部素材；懒初始化、失败静默）----
+def _synth_buffer(segments: list[tuple]) -> bytes:
+    """把若干 (f0, f1, dur, vol, up) 扫频段拼接成 16-bit PCM 字节流。纯函数。"""
+    rate = 22050
+    buf = array.array("h")
+    for (f0, f1, dur, vol, up) in segments:
+        n = max(1, int(rate * dur))
+        for i in range(n):
+            t = i / rate
+            p = i / n
+            f = (f0 + (f1 - f0) * p) if up else (f1 + (f0 - f1) * p)
+            s = math.sin(2 * math.pi * f * t)
+            env = 1.0 - p
+            v = 1.0 if s >= 0 else -1.0
+            buf.append(int(32767 * vol * env * v))
+    out = io.BytesIO()
+    w = wave.open(out, "wb")
+    w.setnchannels(1)
+    w.setsampwidth(2)
+    w.setframerate(rate)
+    w.writeframes(buf.tobytes())
+    w.close()
+    return out.getvalue()
+
+
+# ---- 预渲染贴图（M23，M24 增加相位帧）----
 def _blend(base: tuple[int, int, int], d: int) -> tuple[int, int, int]:
     return (max(0, min(255, base[0] + d)),
             max(0, min(255, base[1] + d)),
@@ -137,12 +174,23 @@ class PygameRenderer:
         self.help_text = help_text
         self.help_shown = False
         self.messages: list[str] = []
-        self.effects: list[dict] = []     # 视图特效（蛛网/闪光），renderer 自身状态
+        self.effects: list[dict] = []     # 视图特效（蛛网/闪光/火花），renderer 自身状态
         self.frame = 0
         self.sound_on = sound_on
         self._snd_web = None
         self._snd_hit = None
+        self._snd_step = None
+        self._snd_swing = None
+        self._snd_sense = None
+        self._snd_win = None
+        self._snd_lose = None
         self._hk = None
+        # 跨帧视图快照（只用于触发视图特效/音效，绝不回写 Game）
+        self._prev_px, self._prev_py = game.px, game.py
+        self._prev_hp = getattr(game, "player_hp", 0)
+        self._prev_sense: set = set()
+        self._glow = None
+        self._vignette = None
         w = game.width * cell_size
         h = game.height * cell_size + HUD_HEIGHT
         pygame.init()
@@ -159,36 +207,54 @@ class PygameRenderer:
     # ---- 预渲染地形贴图 ----
     def _build_tiles(self) -> None:
         cell = self.cell
-        self.tile_floor = self._make_floor(True)
-        self.tile_floor_dim = self._make_floor(False)
-        self.tile_wall = self._make_wall(True)
-        self.tile_wall_dim = self._make_wall(False)
-        self.tile_unseen = self._make_unseen()
+        self.tile_floor = self._make_floor(True, 0)
+        self.tile_floor_dim = self._make_floor(False, 0)
+        self.tile_wall = self._make_wall(True, 0)
+        self.tile_wall_dim = self._make_wall(False, 0)
+        self.tile_unseen = self._make_unseen(0)
+        # 多帧（仅 detail 下生成；小 cell 退化为单帧，保证 headless 轻量）
+        if self.detail:
+            N = 4
+            self.floor_frames = {
+                True: [self._make_floor(True, p) for p in range(N)],
+                False: [self._make_floor(False, p) for p in range(N)],
+            }
+            self.wall_frames = {
+                True: [self._make_wall(True, p) for p in range(N)],
+                False: [self._make_wall(False, p) for p in range(N)],
+            }
+            self.unseen_frames = [self._make_unseen(p) for p in range(N)]
+        else:
+            self.floor_frames = {True: [self.tile_floor], False: [self.tile_floor_dim]}
+            self.wall_frames = {True: [self.tile_wall], False: [self.tile_wall_dim]}
+            self.unseen_frames = [self.tile_unseen]
 
-    def _make_floor(self, visible: bool) -> pygame.Surface:
+    def _make_floor(self, visible: bool, phase: int = 0) -> pygame.Surface:
         cell = self.cell
         s = pygame.Surface((cell, cell))
         base = FLOOR_RGB if visible else FLOOR_DIM
         s.fill(base)
         if self.detail and visible:
             line = _blend(base, 22)        # 蛛网纹理：淡冷色细线
-            # 十字 + 双对角
+            # 十字 + 双对角（相位微调对角偏移，制造「轻闪」呼吸感）
+            off = (phase % 4) - 1          # -1..2 的轻微相位
             for (x0, y0, x1, y1) in (
                 (cell // 2, 0, cell // 2, cell),
                 (0, cell // 2, cell, cell // 2),
-                (0, 0, cell, cell),
-                (cell, 0, 0, cell),
+                (0 + off, 0, cell + off, cell),
+                (cell - off, 0, -off, cell),
             ):
                 pygame.draw.line(s, line, (x0, y0), (x1, y1), 1)
         return s
 
-    def _make_wall(self, visible: bool) -> pygame.Surface:
+    def _make_wall(self, visible: bool, phase: int = 0) -> pygame.Surface:
         cell = self.cell
         s = pygame.Surface((cell, cell))
         base = WALL_RGB if visible else WALL_DIM
         s.fill(base)
         if self.detail:
-            seam = _blend(base, -14)
+            breath = 10 * math.sin(phase * math.pi / 2)   # 砖缝呼吸
+            seam = _blend(base, -14 + int(breath))
             edge = _blend(base, 16)
             # 砖缝：横向 + 纵向
             pygame.draw.line(s, seam, (0, cell // 2), (cell, cell // 2), 1)
@@ -204,14 +270,15 @@ class PygameRenderer:
                 pygame.draw.line(s, edge, (0, 0), (0, cell), 1)
         return s
 
-    def _make_unseen(self) -> pygame.Surface:
+    def _make_unseen(self, phase: int = 0) -> pygame.Surface:
         cell = self.cell
         s = pygame.Surface((cell, cell))
         s.fill(UNSEEN_RGB)
         if self.detail:
             line = _blend(UNSEEN_RGB, 4)
-            pygame.draw.line(s, line, (0, 0), (cell, cell), 1)
-            pygame.draw.line(s, line, (cell, 0), (0, cell), 1)
+            off = (phase % 4) - 1
+            pygame.draw.line(s, line, (0 + off, 0), (cell + off, cell), 1)
+            pygame.draw.line(s, line, (cell - off, 0), (-off, cell), 1)
         return s
 
     # ---- 音效（懒初始化 + 静默降级）----
@@ -221,38 +288,33 @@ class PygameRenderer:
         try:
             if not pygame.mixer.get_init():
                 pygame.mixer.init(frequency=22050, size=-16, channels=1, buffer=512)
-            self._snd_web = self._make_sound(880, 1500, 0.12, 0.22, up=True)
-            self._snd_hit = self._make_sound(200, 80, 0.10, 0.28, up=False)
+            self._snd_web = self._make_sound(880, 1500, 0.12, 0.22, True)
+            self._snd_hit = self._make_sound(200, 80, 0.10, 0.28, False)
+            self._snd_step = self._make_sound(140, 120, 0.05, 0.10, False)
+            self._snd_swing = self._make_sound(1500, 400, 0.18, 0.18, False)
+            self._snd_sense = self._make_sound(1600, 2200, 0.08, 0.16, True)
+            self._snd_win = self._make_seq([
+                (440, 440, 0.12, 0.20, True),
+                (660, 660, 0.12, 0.20, True),
+                (880, 880, 0.20, 0.22, True),
+            ])
+            self._snd_lose = self._make_seq([
+                (330, 330, 0.15, 0.20, False),
+                (220, 220, 0.15, 0.20, False),
+                (140, 140, 0.30, 0.22, False),
+            ])
             self.sound_on = True
         except Exception:
             self.sound_on = False
-            self._snd_web = None
-            self._snd_hit = None
+            for attr in ("_snd_web", "_snd_hit", "_snd_step", "_snd_swing",
+                         "_snd_sense", "_snd_win", "_snd_lose"):
+                setattr(self, attr, None)
 
-    @staticmethod
-    def _make_sound(f0: int, f1: int, dur: float, vol: float, up: bool):
-        import array
-        import io
-        import wave
-        rate = 22050
-        n = int(rate * dur)
-        buf = array.array("h")
-        for i in range(n):
-            t = i / rate
-            p = i / n
-            f = (f0 + (f1 - f0) * p) if up else (f1 + (f0 - f1) * p)
-            s = math.sin(2 * math.pi * f * t)
-            env = 1.0 - p
-            v = 1.0 if s >= 0 else -1.0
-            buf.append(int(32767 * vol * env * v))
-        b = io.BytesIO()
-        w = wave.open(b, "wb")
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(rate)
-        w.writeframes(buf.tobytes())
-        w.close()
-        return pygame.mixer.Sound(b.getvalue())
+    def _make_sound(self, f0: int, f1: int, dur: float, vol: float, up: bool):
+        return pygame.mixer.Sound(_synth_buffer([(f0, f1, dur, vol, up)]))
+
+    def _make_seq(self, segments: list[tuple]):
+        return pygame.mixer.Sound(_synth_buffer(segments))
 
     def play_web(self) -> None:
         if self.sound_on and self._snd_web is not None:
@@ -265,6 +327,41 @@ class PygameRenderer:
         if self.sound_on and self._snd_hit is not None:
             try:
                 self._snd_hit.play()
+            except Exception:
+                pass
+
+    def play_step(self) -> None:
+        if self.sound_on and self._snd_step is not None:
+            try:
+                self._snd_step.play()
+            except Exception:
+                pass
+
+    def play_swing(self) -> None:
+        if self.sound_on and self._snd_swing is not None:
+            try:
+                self._snd_swing.play()
+            except Exception:
+                pass
+
+    def play_sense(self) -> None:
+        if self.sound_on and self._snd_sense is not None:
+            try:
+                self._snd_sense.play()
+            except Exception:
+                pass
+
+    def play_win(self) -> None:
+        if self.sound_on and self._snd_win is not None:
+            try:
+                self._snd_win.play()
+            except Exception:
+                pass
+
+    def play_lose(self) -> None:
+        if self.sound_on and self._snd_lose is not None:
+            try:
+                self._snd_lose.play()
             except Exception:
                 pass
 
@@ -299,6 +396,9 @@ class PygameRenderer:
     def _spawn_flash(self, gx: int, gy: int) -> None:
         self.effects.append({"kind": "flash", "gx": gx, "gy": gy, "ttl": 6, "max": 6})
 
+    def _spawn_burst(self, gx: int, gy: int) -> None:
+        self.effects.append({"kind": "burst", "gx": gx, "gy": gy, "ttl": 12, "max": 12})
+
     def _update_effects(self) -> None:
         alive: list[dict] = []
         for e in self.effects:
@@ -328,11 +428,16 @@ class PygameRenderer:
             return "quit"
         if acted:
             target = self._detect_attack(prev)
+            moved = (game.px != prev_px or game.py != prev_py)
             if target is not None:
                 self._spawn_web(prev_px, prev_py, target[0], target[1])
                 self.play_web()
-                self._spawn_flash(target[0], target[1])
+                self.play_swing()
                 self.play_hit()
+                self._spawn_flash(target[0], target[1])
+                self._spawn_burst(target[0], target[1])
+            elif moved:
+                self.play_step()
             game.monster_turn()
         return msg
 
@@ -349,25 +454,38 @@ class PygameRenderer:
                 if ch == "":
                     continue
                 if ch == " ":
-                    self.screen.blit(self.tile_unseen, (gx * cell, gy * cell))
+                    self.screen.blit(self._frame_tile(self.unseen_frames, gx, gy),
+                                     (gx * cell, gy * cell))
                     continue
                 vis = True if visible is None else ((gx, gy) in visible)
                 base = "#"
                 if gy < len(game.grid) and gx < len(game.grid[gy]):
                     base = game.grid[gy][gx]
                 if base == "#":
-                    tile = self.tile_wall if vis else self.tile_wall_dim
+                    tile = self._frame_tile(self.wall_frames[vis], gx, gy)
                 else:
-                    tile = self.tile_floor if vis else self.tile_floor_dim
+                    tile = self._frame_tile(self.floor_frames[vis], gx, gy)
                 self.screen.blit(tile, (gx * cell, gy * cell))
                 self._draw_glyph(ch, gx, gy, vis)
+        self._draw_light_glow()
         self._draw_effects()
+        self._draw_spider_sense_stings()
+        self._draw_vignette()
         self._draw_hud()
         self._draw_messages()
         if self.help_shown:
             self._draw_help()
+        self._prev_px, self._prev_py = game.px, game.py
+        self._prev_hp = getattr(game, "player_hp", 0)
         self.frame += 1
         pygame.display.flip()
+
+    def _frame_tile(self, frames: list, gx: int, gy: int) -> pygame.Surface:
+        """按 self.frame 在预渲染帧间切换（相位动画）。纯视图，零随机。"""
+        n = len(frames)
+        if n <= 1:
+            return frames[0]
+        return frames[(self.frame // 6 + (gx + gy)) % n]
 
     def _draw_glyph(self, ch: str, gx: int, gy: int, vis: bool) -> None:
         if ch == "@":
@@ -398,8 +516,26 @@ class PygameRenderer:
     def _draw_spidey(self, gx: int, gy: int, vis: bool) -> None:
         cell = self.cell
         cxp, cyp = self._center(gx, gy)
+        # 待机呼吸（垂直浮动）
+        bob = math.sin(self.frame * 0.12) * cell * 0.04
+        cyp += bob
+        # 攻击突进：读取活动 web 特效方向
+        dx = dy = 0.0
+        for e in self.effects:
+            if e["kind"] == "web" and e["gx0"] == gx and e["gy0"] == gy:
+                prog = 1 - e["ttl"] / e["max"]
+                lx, ly = e["gx1"] - e["gx0"], e["gy1"] - e["gy0"]
+                d = math.hypot(lx, ly) or 1
+                push = cell * 0.22 * (1 - abs(prog - 0.5) * 2)  # 中段最大冲量
+                dx, dy = lx / d * push, ly / d * push
+                break
+        cxp += dx
+        cyp += dy
+        # 受击红闪（跨帧 HP 下降）
+        hurt = getattr(self.game, "player_hp", 0) < self._prev_hp
+        body = SPIDEY_RED if not hurt else (255, 120, 120)
         r = cell * 0.40
-        pygame.draw.circle(self.screen, SPIDEY_RED, (cxp, cyp), r)
+        pygame.draw.circle(self.screen, body, (cxp, cyp), r)
         lw = max(1, cell // 18)
         for k in range(8):
             a = math.radians(k * 45)
@@ -418,6 +554,9 @@ class PygameRenderer:
     def _draw_enemy(self, gx: int, gy: int, ch: str, vis: bool, m) -> None:
         cell = self.cell
         cxp, cyp = self._center(gx, gy)
+        # 待机浮动
+        bob = math.sin(self.frame * 0.10 + (gx + gy) * 0.7) * cell * 0.04
+        cyp += bob
         r = cell * 0.36
         body = (60, 62, 78) if vis else (40, 41, 52)
         pygame.draw.circle(self.screen, body, (cxp, cyp), r)
@@ -427,7 +566,10 @@ class PygameRenderer:
             eye = (130, 50, 50)
         else:
             eye = (70, 130, 240)   # ~ 听见
-        er = r * 0.26
+        # 眨眼（眼形/亮度随相位振荡）
+        blink = math.sin(self.frame * 0.07 + (gx - gy) * 0.9)
+        eye_scale = 0.2 if blink > 0.92 else 1.0
+        er = r * 0.26 * eye_scale
         for sx in (-1, 1):
             pygame.draw.circle(self.screen, eye, (cxp + sx * r * 0.34, cyp - r * 0.1), er)
         if ch == "~":
@@ -497,33 +639,117 @@ class PygameRenderer:
     def _draw_spider_sense(self, gx: int, gy: int) -> None:
         cell = self.cell
         cxp, cyp = self._center(gx, gy)
-        # 红色脉冲光晕（彼得「蜘蛛感应 tingling」的视觉化），按帧轻微脉动
-        pulse = 0.5 + 0.5 * math.sin(self.frame * 0.25)
-        alpha = int(60 + 90 * pulse)
-        r = cell * (0.42 + 0.10 * pulse)
-        surf = pygame.Surface((cell, cell), pygame.SRCALPHA)
-        pygame.draw.circle(surf, (225, 40, 50, alpha), (cell / 2, cell / 2), r)
-        self.screen.blit(surf, (gx * cell, gy * cell))
+        # 扩散同心环（M24 升级：取代单团脉冲），随帧外扩淡出
+        rings = 3
+        for i in range(rings):
+            phase = (self.frame * 0.05 + i / rings) % 1.0
+            rr = cell * (0.30 + 0.55 * phase)
+            alpha = int(120 * (1 - phase))
+            if alpha <= 0:
+                continue
+            surf = pygame.Surface((cell, cell), pygame.SRCALPHA)
+            pygame.draw.circle(surf, (225, 40, 50, alpha), (cell / 2, cell / 2), rr, 2)
+            self.screen.blit(surf, (gx * cell, gy * cell))
 
     def _draw_effects(self) -> None:
         cell = self.cell
         for e in self.effects:
             a = int(255 * (e["ttl"] / e["max"]))
             if e["kind"] == "web":
+                # 蛛网从玩家向目标「行进」（随 ttl 减小而伸长）
+                frac = 1 - e["ttl"] / e["max"]
                 x0, y0 = self._center(e["gx0"], e["gy0"])
-                x1, y1 = self._center(e["gx1"], e["gy1"])
-                # 一缕略带锯齿的蛛丝
+                tx, ty = self._center(e["gx1"], e["gy1"])
+                x1 = x0 + (tx - x0) * frac
+                y1 = y0 + (ty - y0) * frac
                 pygame.draw.line(self.screen, (235, 245, 255, a), (x0, y0), (x1, y1), 2)
-                mx, my = (x0 + x1) / 2, (y0 + y1) / 2
-                pygame.draw.line(self.screen, (235, 245, 255, a),
-                                 (x0, y0), (mx + 3, my - 3), 1)
-                pygame.draw.line(self.screen, (235, 245, 255, a),
-                                 (mx + 3, my - 3), (x1, y1), 1)
             elif e["kind"] == "flash":
                 cxp, cyp = self._center(e["gx"], e["gy"])
                 surf = pygame.Surface((cell, cell), pygame.SRCALPHA)
                 pygame.draw.circle(surf, (255, 255, 255, a), (cell / 2, cell / 2), cell * 0.4)
                 self.screen.blit(surf, (e["gx"] * cell, e["gy"] * cell))
+            elif e["kind"] == "burst":
+                # 命中火花：扩散同心环
+                cxp, cyp = self._center(e["gx"], e["gy"])
+                frac = 1 - e["ttl"] / e["max"]
+                surf = pygame.Surface((cell, cell), pygame.SRCALPHA)
+                for k in range(2):
+                    rr = cell * (0.15 + 0.35 * frac) + k * cell * 0.12
+                    aa = int(a * (1 - k * 0.5))
+                    pygame.draw.circle(surf, (255, 240, 200, aa),
+                                       (cell / 2, cell / 2), rr, 2)
+                self.screen.blit(surf, (e["gx"] * cell, e["gy"] * cell))
+
+    # ---- 氛围层（M24）----
+    def _draw_light_glow(self) -> None:
+        game = self.game
+        if not getattr(game, "light_enabled", False):
+            return
+        if self._glow is None:
+            self._glow = self._make_glow(self.cell)
+        cell = self.cell
+        gw, gh = self._glow.get_size()
+        visible = game.visible if game.fov_enabled else None
+        for gy in range(game.height):
+            for gx in range(game.width):
+                if visible is not None and (gx, gy) not in visible:
+                    continue
+                try:
+                    lvl = game.light_level_at(gx, gy)
+                except Exception:
+                    continue
+                if lvl < LIGHT_LIT:
+                    continue
+                self.screen.blit(self._glow,
+                                 (gx * cell - (gw - cell) / 2,
+                                  gy * cell - (gh - cell) / 2),
+                                 special_flags=pygame.BLEND_ADD)
+
+    def _make_glow(self, cell: int) -> pygame.Surface:
+        g = pygame.Surface((cell * 2, cell * 2), pygame.SRCALPHA)
+        c = cell
+        for r in range(c, 0, -1):
+            alpha = int(70 * (1 - r / c))
+            if alpha <= 0:
+                continue
+            pygame.draw.circle(g, (255, 235, 170, alpha), (c, c), r)
+        return g
+
+    def _draw_vignette(self) -> None:
+        if not self.detail:
+            return
+        w = self.game.width * self.cell
+        h = self.game.height * self.cell
+        if self._vignette is None:
+            self._vignette = self._make_vignette(w, h)
+        self.screen.blit(self._vignette, (0, 0))
+
+    def _make_vignette(self, w: int, h: int) -> pygame.Surface:
+        sw, sh = max(2, w // 6), max(2, h // 6)
+        small = pygame.Surface((sw, sh), pygame.SRCALPHA)
+        cx, cy = sw / 2.0, sh / 2.0
+        maxd = math.hypot(cx, cy) or 1.0
+        for yy in range(sh):
+            for xx in range(sw):
+                d = math.hypot(xx - cx, yy - cy) / maxd
+                a = int(150 * max(0.0, d - 0.55) ** 1.5)
+                small.set_at((xx, yy), (0, 0, 0, a))
+        return pygame.transform.smoothscale(small, (w, h))
+
+    def _draw_spider_sense_stings(self) -> None:
+        """对比当前蜘蛛感应集合与上一帧，对新出现的威胁播放刺痛音（纯视图）。"""
+        game = self.game
+        if not getattr(game, "fov_enabled", False):
+            return
+        sense = set()
+        try:
+            for m in game.spider_sense():
+                sense.add((m.x, m.y))
+        except Exception:
+            return
+        if sense - self._prev_sense:
+            self.play_sense()
+        self._prev_sense = sense
 
     # ---- HUD（主题化）----
     def _draw_hud(self) -> None:
@@ -657,11 +883,13 @@ class PygameRenderer:
 
     def _check_ending(self) -> str | None:
         if self.game.player_dead:
+            self.play_lose()
             self._draw_banner("蜘蛛侠被击倒了……（游戏结束）", (200, 60, 60))
             self._wait_key()
             return "dead"
         alive = [m for m in self.game.monsters if m.alive]
         if self.game.depth >= self.max_depth and not alive:
+            self.play_win()
             self._draw_banner("三层清场，蜘蛛侠摆荡着回家吃三明治。（你赢了！）",
                               (90, 200, 120))
             self._wait_key()

@@ -236,5 +236,100 @@ class TestM23ThemedDraw(unittest.TestCase):
             self.assertIsNotNone(getattr(r, name))
 
 
+@unittest.skipUnless(_HAVE_GUI, "pygame 未安装（headless 跳过）")
+class TestM24AnimationAndArt(unittest.TestCase):
+    def setUp(self):
+        self.r = PygameRenderer(_new_game(), cell_size=28)
+
+    def test_animation_frames_built(self):
+        # detail=True 时应有多帧相位贴图；小 cell 退化为单帧
+        self.assertGreater(len(self.r.floor_frames[True]), 1)
+        self.assertGreater(len(self.r.wall_frames[True]), 1)
+        self.assertGreater(len(self.r.unseen_frames), 1)
+        small = PygameRenderer(_new_game(), cell_size=8)
+        self.assertEqual(len(small.floor_frames[True]), 1)
+
+    def test_tile_attribute_contract_kept(self):
+        # M23 测试钉死的 5 个预渲染属性名仍存在且非 None
+        for name in ("tile_floor", "tile_floor_dim", "tile_wall",
+                     "tile_wall_dim", "tile_unseen"):
+            self.assertIsNotNone(getattr(self.r, name))
+
+    def test_multi_frame_draw_no_error(self):
+        # 多帧 draw 不应抛错（动画由 self.frame 驱动）
+        for _ in range(20):
+            self.r.draw()
+        self.r.help_shown = True
+        self.r.draw()
+
+    def test_spider_sense_rings_no_error(self):
+        for f in range(0, 40, 5):
+            self.r.frame = f
+            self.r._draw_spider_sense(2, 2)
+
+    def test_burst_effect_spawn_and_decay(self):
+        self.r._spawn_burst(3, 3)
+        self.assertEqual(self.r.effects[-1]["kind"], "burst")
+        self.assertEqual(self.r.effects[-1]["ttl"], self.r.effects[-1]["max"])
+        # draw 几帧后随 ttl 衰减消失
+        for _ in range(self.r.effects[-1]["max"] + 5):
+            self.r._update_effects()
+        self.assertEqual(len([e for e in self.r.effects if e["kind"] == "burst"]), 0)
+
+    def test_web_projectile_progress_no_error(self):
+        # 蛛网行进（progress 随 ttl）绘制不报错
+        self.r._spawn_web(1, 1, 5, 3)
+        for _ in range(12):
+            self.r.draw()
+
+    def test_audio_methods_no_error(self):
+        # 音效方法在 headless（可能 sound_on=False）下不得抛错
+        self.r.play_web()
+        self.r.play_hit()
+        self.r.play_step()
+        self.r.play_swing()
+        self.r.play_sense()
+        self.r.play_win()
+        self.r.play_lose()
+
+    def test_rendering_purity_no_game_change(self):
+        # 渲染（含动画/特效/氛围）绝不改写 Game 状态（不变量 #8/#24）
+        g = self.r.game
+        snap = (g.px, g.py, g.player_hp, g.depth,
+                len(g.inventory), len([m for m in g.monsters if m.alive]),
+                g.render())
+        self.r._spawn_web(g.px, g.py, g.px + 1, g.py)
+        self.r._spawn_burst(g.px, g.py)
+        for _ in range(15):
+            self.r.draw()
+        after = (g.px, g.py, g.player_hp, g.depth,
+                 len(g.inventory), len([m for m in g.monsters if m.alive]),
+                 g.render())
+        self.assertEqual(snap, after)
+
+    def test_draw_does_not_break_parity(self):
+        # draw() 夹在 apply_keys 步骤之间，仍与终端路径逐字节同态（#2/#24）
+        seq = ["w", "s", "a", "d", " ", "w", "w", "g", "s", "d", " "]
+        g_term = _new_game()
+        g_gui = _new_game()
+        _run_seq_terminal(g_term, seq)
+        r = PygameRenderer(g_gui, cell_size=28)
+        for token in seq:
+            acted, msg = _handle_key(g_gui, token)
+            if msg == "quit":
+                break
+            if acted:
+                r.draw()                  # 视图动画介入，但不应改 Game
+                g_gui.monster_turn()
+            if g_gui.player_dead:
+                break
+        self.assertEqual(g_term.player_hp, g_gui.player_hp)
+        self.assertEqual((g_term.px, g_term.py), (g_gui.px, g_gui.py))
+        self.assertEqual(g_term.depth, g_gui.depth)
+        self.assertEqual(len([m for m in g_term.monsters if m.alive]),
+                         len([m for m in g_gui.monsters if m.alive]))
+        self.assertEqual(len(g_term.inventory), len(g_gui.inventory))
+
+
 if __name__ == "__main__":
     unittest.main()
