@@ -216,29 +216,30 @@ DECOY_MIN_THREAT = 2     # 至少被几只敌人盯上，才值得花一回合�
 
 
 def _light_to_destroy(game: Game):
-    """M16：找一个值得射碎灯泡的房间——未察觉敌人所在、灯还亮着、玩家够得着。
+    """M19：找一个值得射碎**墙边开关**的房间——未察觉敌人所在、灯还亮着、玩家够得着开关。
 
-    战术：蛛网射碎敌人所在房间的灯泡 ⇒ 房间永久黑暗（M11 暗处缩短怪物感知 + M13 缩短玩家视野——双刃），
-    且不可逆（不像 M14 拉链还能再拉开），适合「只摸哨、不打算回来打」的潜行路线。
-    遍历未察觉敌人，找它们所在房间中灯还亮着且玩家够得着（LOS + 射程）的最近者。
+    战术：蛛网射碎敌人所在房间墙边开关的灯泡 ⇒ 房间永久黑暗（M11 暗处缩短怪物感知
+    + M13 缩短玩家视野——双刃），且不可逆，适合「只摸哨、不打算回来打」的潜行路线。
+    遍历未察觉敌人，找它们所在房间中灯还亮着且玩家够得着墙上开关（LOS + 射程）的最近者。
     确定性：遍历顺序固定、用严格小于取最近（不引入任何随机）。
-    没有可碎的灯时返回 None（不浪费回合）。
+    没有可碎的开关时返回 None（不浪费回合）。
     """
     best = None
     best_dist = None
     for m in game.unaware_monsters():
-        for room in game.rooms:
-            if not room.contains(m.x, m.y):
+        for sw in game.switches:
+            if sw.destroyed:
                 continue
-            cx, cy = room.center
-            if not game.light_is_on(cx, cy):
+            if not sw.room.contains(m.x, m.y):
+                continue
+            if not game.light_is_on(*sw.room.center):
                 continue       # 灯已经不亮了（关着 / 已碎）
-            if not game.can_destroy_light(cx, cy):
-                continue       # 够不着（看不见 / 射程外 / 已碎）
-            dist = abs(cx - game.px) + abs(cy - game.py)
+            if not game.can_destroy_switch(sw.x, sw.y):
+                continue       # 够不着开关（看不见 / 射程外 / 已碎）
+            dist = abs(sw.x - game.px) + abs(sw.y - game.py)
             if best_dist is None or dist < best_dist:
                 best_dist = dist
-                best = (cx, cy)
+                best = (sw.x, sw.y)
     return best
 
 
@@ -275,15 +276,15 @@ def _player_act(game: Game) -> str:
             return ("打开蛛网探照灯，照亮战场" if want_on
                     else "关掉蛛网探照灯，摸黑潜行")
 
-    # 0b) M16 可破坏的灯：潜行 + 光照模式下，蛛网射碎未察觉敌人所在房间的灯泡
+    # 0b) M19 灯开关独立实体：潜行 + 光照模式下，蛛网射碎未察觉敌人所在房间**墙边开关**的灯泡
     #     （永久黑暗 ⇒ 暗处缩短怪物感知 ⇒ 更容易摸哨；双刃：你也看不远，但手电/蜘蛛感应可导航；
-    #      不可逆——潜行路线里本就不打算回来点亮它）
+    #      不可逆——潜行路线里本就不打算回来点亮它；开关只是灯具的解耦控制手柄，声源仍在灯具处）
     if game.light_enabled and game.stealth_enabled:
         spot = _light_to_destroy(game)
         if spot is not None:
-            cx, cy = spot
-            game.destroy_light(cx, cy)
-            return f"蛛网射碎 ({cx},{cy}) 处的灯泡——永夜降临，摸黑接近"
+            x, y = spot
+            game.destroy_switch(x, y)
+            return f"蛛网射碎 ({x},{y}) 处的墙边开关——永夜降临，摸黑接近"
 
     # 1) 纳米强化剂：永久提升蛛网拳伤害，越早用越值
     idx = _find_in_bag(game, "nano_boost")
@@ -404,7 +405,8 @@ def main() -> None:
         color_on = should_color()
     rng = RandomSource(seed=SEED)
     game = Game.procedural(rng, depth=1, fov=fog, stealth=stealth,
-                           noise=noise, light=light, flashlight=flashlight)
+                           noise=noise, light=light, flashlight=flashlight,
+                           switches=light)
     print(f"=== 第 {game.depth} 层「{game.level_name}」（seed={SEED}）===")
     if fog:
         print(LEGEND)

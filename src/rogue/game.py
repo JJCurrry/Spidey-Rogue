@@ -1,6 +1,7 @@
-"""M1~M14：格子地图 + 玩家移动 + 战斗系统 + 怪物 AI + 道具背包 + 程序化关卡 + 视野渲染
+"""M1~M19：格子地图 + 玩家移动 + 战斗系统 + 怪物 AI + 道具背包 + 程序化关卡 + 视野渲染
 + 怪物感知潜行 + 噪音听觉 + 主动制造响动 + ANSI 颜色 + 光照衰减 + 随身手电 + 光照影响玩家视野
-+ 可开关房间灯（蜘蛛侠 MCU 荷兰弟版主题）。
++ 可开关房间灯 + 可破坏的灯 + 环境光照场分离 + 怪物感知改用环境场 + 灯开关独立实体
+（蜘蛛侠 MCU 荷兰弟版主题）。
 
 注意（不变量 #1）：随机经 RandomSource 注入；本模块不直接引入随机模块。
 注意（GB-1 边界地雷）：不可走出边界、不可走入墙、不可走入怪物。
@@ -44,7 +45,7 @@ from __future__ import annotations
 from typing import NamedTuple
 from .rng import RandomSource
 from .tiles import (WALL, FLOOR, PLAYER, MONSTER, ITEM, STAIRS, UNSEEN, SENSE,
-                    UNAWARE, HEARD)
+                    UNAWARE, HEARD, SWITCH)
 from .level import Level, Room, generate_level, TUTORIAL_LEVEL_NAME
 from .fov import (SIGHT_RADIUS, SPIDER_SENSE_RADIUS, MONSTER_SIGHT_RADIUS,
                   visible_tiles, in_spider_sense, monster_can_see,
@@ -230,11 +231,33 @@ class Monster:
         return self.hp
 
 
+class LightSwitch:
+    """M19 墙上的灯开关实体（与灯泡分离的独立实体）。
+
+    灯装在房间天花板中央（M11 光源 = room.center），但开关是墙上另一处格子——
+    蛛网射中**开关**而非灯泡本身，翻转/射碎该房间的灯。这样光照控制从「射灯泡」
+    变成更真实的「墙边开关」，且开关位置与灯具位置解耦（不变量 #19）。
+
+    只记录位置与所属房间，不含任何随机状态；`destroyed` 是「被射碎」标志
+    （一次性不可逆，与 M16 的灯泡破坏同源）。
+    """
+
+    def __init__(self, x: int, y: int, room: "Room") -> None:
+        self.x = x
+        self.y = y
+        self.room = room          # 它控制的房间（room.center 即灯具坐标）
+        self.destroyed = False    # 是否被蛛网射碎（射碎后不可再 toggle）
+
+    def __repr__(self) -> str:
+        return f"LightSwitch({self.x},{self.y}->room{self.room.center})"
+
+
 class Game:
     def __init__(self, rng: RandomSource | None = None, level: Level | None = None,
                  populate: bool = True, fov: bool = False,
                  stealth: bool = False, noise: bool = False,
-                 light: bool = False, flashlight: bool = False) -> None:
+                 light: bool = False, flashlight: bool = False,
+                 switches: bool = False) -> None:
         """rng 为注入的随机源；level 为 None 时用 M1 的固定教学图，否则装载程序化楼层。
 
         populate 控制装载时是否自动撒怪与补给（测试生成期结构时可关掉）。
@@ -285,6 +308,14 @@ class Game:
         # destroy_light 射碎灯泡后加入该集合；_light_sources 同时跳过它与 switched_lights ⇒ 房间彻底黑暗、不可恢复。
         # 换层（load_level）清空：新楼层 = 新房间 = 新灯泡。纯状态、不消耗 RandomSource（#16）。
         self.destroyed_lights: set[tuple[int, int]] = set()
+        # M19 灯开关独立实体状态：switches_enabled 是「是否摆墙边开关」的开关（opt-in，默认关闭，
+        # 与 M6/M7/M8/M11/M12 同一哲学——不加 --light 时演示与 M18 逐字节一致）；
+        # switches 是墙边开关实体列表（每个房间一个，确定性摆位、不消耗 RandomSource）。
+        # 开关只是「灯具 room.center 的解耦控制手柄」：toggle/destroy 仍翻 switched_lights/destroyed_lights
+        # （按 room.center 记录），复用 M14/M16 全部光照场逻辑 ⇒ 行为零回归（不变量 #19）。
+        self.switches_enabled = switches
+        self.switches: list["LightSwitch"] = []
+        self.destroyed_lights: set[tuple[int, int]] = set()
         # M2 玩家状态（跨层保留：HP / 背包 / 纳米加成）
         self.player_max_hp = PLAYER_MAX_HP
         self.player_hp = PLAYER_MAX_HP
@@ -306,6 +337,9 @@ class Game:
             self._grant_decoy()   # M9：听觉开启时脚边躺着一个垃圾桶盖
         else:
             self.load_level(level, populate=populate)
+        # M19：按开关启用状态摆墙边开关（教程图 rooms=[] ⇒ 不摆；程序化楼层 load_level 已摆过，
+        # 这里再摆一次幂等、零随机；switches_enabled=False ⇒ 不摆，保证默认/潜行/听觉演示逐字节不变）。
+        self._place_switches()
 
     def _find_player(self):
         for y, row in enumerate(self.grid):
@@ -893,18 +927,19 @@ class Game:
     def procedural(cls, rng: RandomSource, depth: int = 1,
                    fov: bool = False, stealth: bool = False,
                    noise: bool = False, light: bool = False,
-                   flashlight: bool = False) -> "Game":
+                   flashlight: bool = False, switches: bool = False) -> "Game":
         """开一局程序化楼层：生成与撒点共用同一个 rng，先后固定（#1/#2）。
 
         fov=True 时开启视野/迷雾（M6，默认关闭）；
         stealth=True 时开启怪物感知与潜行（M7，默认关闭）；
         noise=True 时开启噪音与听觉（M8，默认关闭）；
         light=True 时开启光照衰减（M11，默认关闭）；
-        flashlight=True 时装备随身手电（M12，默认关闭，需配合 light=True 才有意义）。
+        flashlight=True 时装备随身手电（M12，默认关闭，需配合 light=True 才有意义）；
+        switches=True 时摆墙边灯开关实体（M19，默认关闭，需配合 light=True 才有意义）。
         """
         return cls(rng=rng, level=generate_level(rng, depth=depth),
                    fov=fov, stealth=stealth, noise=noise, light=light,
-                   flashlight=flashlight)
+                   flashlight=flashlight, switches=switches)
 
     def load_level(self, level: Level, populate: bool = True) -> None:
         """装载一层程序化楼层：重置地形与实体，**保留**玩家 HP / 背包 / 伤害加成。
@@ -914,6 +949,7 @@ class Game:
         self.explored = set()  # 换层即失忆：上一层的地形记忆对新楼层无意义
         self.switched_lights = set()  # M14：新楼层 = 新房间 = 新灯（关灯状态不跨层）
         self.destroyed_lights = set()  # M16：新楼层 = 新房间 = 新灯泡（碎灯状态不跨层）
+        self.switches = []      # M19：新楼层 = 新房间 = 新开关（开关实体不跨层）
         self.grid = [list(row) for row in level.grid]
         self.height = level.height
         self.width = level.width
@@ -929,6 +965,7 @@ class Game:
         if populate:
             self._populate_level()
         self._grant_decoy()  # M9：新一层，又随手抄到一个垃圾桶盖（在撒点之后，不抢补给的位置）
+        self._place_switches()  # M19：按开关启用状态摆墙边开关（switches_enabled=False ⇒ 不摆）
 
     def _populate_level(self) -> None:
         """按房间撒怪与补给：起始房间不刷怪，留一间房喘息。
@@ -1253,6 +1290,138 @@ class Game:
         self.emit_noise(x, y, NOISE_SHATTER_BULB)
         return True
 
+    # ---------- M19 灯开关独立实体（墙上的开关 tile，与灯泡分离）----------
+    # 不变量 #19：灯开关是**纯几何、零随机**的独立实体（game.py 不引入随机模块、不消耗 RandomSource）；
+    #           默认关闭（switches=False ⇒ 不摆开关，M1~M18 的 render/行为一字节不变）；
+    #           开关只是「灯具 room.center 的解耦控制手柄」——toggle/destroy 翻的是 **同一份**
+    #           switched_lights/destroyed_lights（按 room.center 记录），复用 M14/M16 全部光照场逻辑
+    #           ⇒ 关灯/碎灯只移除光源（不新增）⇒ 光照场只变暗、有效半径恒 ≤ SIGHT_RADIUS(8) ⇒ #9/#12/#14 不破；
+    #           声源取房间灯具坐标（room.center，与 M14/M16 灯处发声同源）⇒ 调虎离山成立、演示可复现；
+    #           开关摆位是确定性几何（扫描房间四条边外侧相邻的墙格，固定顺序取第一个），不消耗 RandomSource；
+    #           已碎的开关不可再 toggle（can_toggle_switch 对 destroyed 返 False）；
+    #           render 只新增一个 `=` 字形（已碎退回 `#`），不改其它字形（#8 延伸）。
+    # 设计要点（ADR-015）：灯泡装在房间中央（M11 光源），但「开关」是墙上另一处——
+    #           蛛网射中**开关**而非灯泡，更真实（你不会去够天花板中央，而是拍墙上的闸）；
+    #           开关位置与灯具位置解耦 ⇒ 即使站在房间里够得到开关，也不要求看得见房间正中央。
+    def _switch_position_for(self, room: "Room") -> "tuple[int, int] | None":
+        """为房间挑一个墙上的开关位置（确定性、零随机，不变量 #1/#2）。
+
+        扫描房间四条边**外侧相邻**、且本身是墙的格子，按 北 → 南 → 西 → 东 的固定顺序，
+        返回第一个命中的墙格（作为开关实体坐标）。全部都不是墙（极端退化）⇒ 返回 None
+        （该房间不摆开关，不消耗任何状态）。
+        """
+        x0, y0, w, h = room.x, room.y, room.w, room.h
+        candidates: list[tuple[int, int]] = []
+        for i in range(w):                      # 北边：y-1，x 从 0..w-1
+            candidates.append((x0 + i, y0 - 1))
+        for i in range(w):                      # 南边：y+h，x 从 0..w-1
+            candidates.append((x0 + i, y0 + h))
+        for j in range(h):                      # 西边：x-1，y 从 0..h-1
+            candidates.append((x0 - 1, y0 + j))
+        for j in range(h):                      # 东边：x+w，y 从 0..h-1
+            candidates.append((x0 + w, y0 + j))
+        for (cx, cy) in candidates:
+            if self.in_bounds(cx, cy) and self.is_wall(cx, cy):
+                return (cx, cy)
+        return None
+
+    def _place_switches(self) -> None:
+        """按楼层房间摆墙边开关（M19 实体）。仅 switches_enabled 时摆；换层（load_level）重摆即重置。"""
+        self.switches = []
+        if not self.switches_enabled:
+            return
+        for room in self.rooms:
+            pos = self._switch_position_for(room)
+            if pos is not None:
+                self.switches.append(LightSwitch(pos[0], pos[1], room))
+
+    def switch_at(self, x: int, y: int) -> "LightSwitch | None":
+        """查询 (x,y) 处的墙边开关（纯查询、不改状态）。"""
+        for s in self.switches:
+            if s.x == x and s.y == y:
+                return s
+        return None
+
+    def can_toggle_switch(self, x: int, y: int) -> bool:
+        """蛛网能否够到 (x,y) 处的墙边开关（纯几何、零随机，不变量 #19）。
+
+        四条硬约束，任一不满足即够不着：开关已启用 + (x,y) 是某开关 + 该开关未碎
+        + 切比雪夫距离 ≤ WEB_LIGHT_RANGE（含脚下——站在开关旁伸手就能够到）
+        + 玩家**看得见开关**（复用 M14 的 has_line_of_sight——蛛网走直线、遇墙即断）。
+        """
+        if not self.switches_enabled or not self.light_enabled:
+            return False
+        sw = self.switch_at(x, y)
+        if sw is None or sw.destroyed:
+            return False
+        if max(abs(x - self.px), abs(y - self.py)) > WEB_LIGHT_RANGE:
+            return False
+        return has_line_of_sight(self.grid, (self.px, self.py), (x, y))
+
+    def toggle_switch(self, x: int, y: int) -> bool:
+        """蛛网射中墙边开关，翻转该房间的灯（纯几何、零随机，不变量 #19）。
+
+        翻 `switched_lights` 集合（按房间灯具坐标 room.center 记录，与 M14 同源）⇒
+        关灯变暗（M11 暗处缩短怪物感知 + M13 暗处缩短玩家视野——双刃）/ 开灯恢复。
+        声源取房间灯具坐标（room.center）⇒ 与 M14/M16 灯处发声同源、演示可复现（#10）。
+        返回是否翻转成功；够不着 / 已碎 / 光照关 / 开关未启用 ⇒ False，不改状态、不消耗道具。
+        """
+        if not self.can_toggle_switch(x, y):
+            return False
+        sw = self.switch_at(x, y)
+        assert sw is not None
+        center = sw.room.center
+        if center in self.switched_lights:
+            self.switched_lights.remove(center)   # 重新开灯（恢复明亮）
+        else:
+            self.switched_lights.add(center)       # 关灯（房间变暗）
+        self.update_fov()                          # 重算光照场 + 可见集合（幂等、纯几何零随机）
+        # M8 联动：轻响从灯具坐标传出——声源不在玩家脚下 ⇒ 调虎离山成立（与 M14 拉链同源）
+        self.emit_noise(center[0], center[1], NOISE_TOGGLE_LIGHT)
+        return True
+
+    def can_destroy_switch(self, x: int, y: int) -> bool:
+        """蛛网能否射碎 (x,y) 处的墙边开关（纯几何、零随机，不变量 #19）。
+
+        五条硬约束（比 can_toggle_switch 多一条「尚未被射碎」）：开关已启用 + (x,y) 是某开关
+        + 该开关未碎 + 切比雪夫距离 ≤ WEB_LIGHT_RANGE（含脚下）+ 玩家看得见开关（has_line_of_sight）。
+        """
+        if not self.switches_enabled or not self.light_enabled:
+            return False
+        sw = self.switch_at(x, y)
+        if sw is None or sw.destroyed:
+            return False
+        if max(abs(x - self.px), abs(y - self.py)) > WEB_LIGHT_RANGE:
+            return False
+        return has_line_of_sight(self.grid, (self.px, self.py), (x, y))
+
+    def destroy_switch(self, x: int, y: int) -> bool:
+        """蛛网射碎墙边开关（一次性不可逆，不变量 #19）。
+
+        碎了该房间灯永久熄灭（room.center 加入 destroyed_lights），且开关本体标记 `destroyed`
+        （不可再 toggle）。声源取房间灯具坐标（room.center）⇒ 与 M16 同源、演示可复现（#10）。
+        返回是否破坏成功；够不着 / 已碎 / 光照关 / 开关未启用 ⇒ False，不改状态。
+        """
+        if not self.can_destroy_switch(x, y):
+            return False
+        sw = self.switch_at(x, y)
+        assert sw is not None
+        center = sw.room.center
+        sw.destroyed = True
+        self.destroyed_lights.add(center)
+        self.switched_lights.discard(center)   # 碎了就不必再记「关灯」状态
+        self.update_fov()                       # 重算光照场 + 可见集合（幂等、纯几何零随机）
+        # M8 联动：碎裂轻响从灯具坐标传出——声源不在玩家脚下 ⇒ 调虎离山成立（与 M16 碎裂同源）
+        self.emit_noise(center[0], center[1], NOISE_SHATTER_BULB)
+        return True
+
+    def switch_light_is_on(self, x: int, y: int) -> bool:
+        """(x,y) 处墙边开关控制的房间灯是否亮（纯查询、不改状态）。非开关 / 已碎 ⇒ False（无灯可亮）。"""
+        sw = self.switch_at(x, y)
+        if sw is None or sw.destroyed:
+            return False
+        return self.light_is_on(*sw.room.center)
+
     def is_visible(self, x: int, y: int) -> bool:
         return (x, y) in self.visible
 
@@ -1306,6 +1475,11 @@ class Game:
             if m.alive and self.in_bounds(m.x, m.y):
                 # M7/M8：未察觉画小写 m（可从背后倒挂突袭）、听见动静画 ~、已看见画 M
                 view[m.y][m.x] = self._monster_glyph(m)
+        # M19：墙边开关（实体层，渲染为 =；已碎的开关退回 #，不再作控制点；只在开关启用时画）
+        if self.switches_enabled:
+            for s in self.switches:
+                if not s.destroyed and self.in_bounds(s.x, s.y):
+                    view[s.y][s.x] = SWITCH
         return "\n".join("".join(row) for row in view)
 
     def _render_fog(self) -> str:
@@ -1336,6 +1510,12 @@ class Game:
         for it in self.items:
             if self.in_bounds(it.x, it.y) and self.is_explored(it.x, it.y):
                 view[it.y][it.x] = ITEM
+        # 4b) 墙边开关：已探索的开关画 =（已碎退回 #，不再作控制点）；只在开关启用时画
+        if self.switches_enabled:
+            for s in self.switches:
+                if (self.in_bounds(s.x, s.y) and self.is_explored(s.x, s.y)
+                        and not s.destroyed):
+                    view[s.y][s.x] = SWITCH
         # 5) 怪物：只在**当前可见**时画（怪物会跑，记忆里的位置会骗人）；
         #    M7/M8：未察觉画小写 m、听见动静画 ~、已看见画 M
         for m in self.visible_monsters():
