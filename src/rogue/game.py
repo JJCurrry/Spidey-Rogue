@@ -33,6 +33,12 @@
                   纯几何、零随机、不消耗 RandomSource；默认关闭（light=False ⇒ toggle_light 恒返回 False）；
                   关灯只移除光源（不新增）⇒ 光照场只变暗或恢复，有效半径恒 ≤ SIGHT_RADIUS(8) ⇒ #9/#12/#14 不破；
                   声源在灯处（不在玩家处）⇒ M8 调虎离山成立；toggle_light 只翻集合 + 重算场，不改写任何玩法状态（换层重置）。
+注意（不变量 #16）：M16 可破坏的灯——蛛网射碎房间中心灯泡，一次性不可逆（per floor）；
+                  纯几何、零随机、不消耗 RandomSource；默认关闭（light=False ⇒ destroy_light 恒返回 False、no-op，
+                  与 M1~M15 逐字节一致）；破坏只移除光源（_light_sources 同时跳过 switched_lights 与 destroyed_lights），
+                  不新增光源 ⇒ 光照场只变暗、有效半径恒 ≤ SIGHT_RADIUS(8) ⇒ #9/#12/#14 对称硬性质不破；
+                  破坏的灯不再可 toggle（can_toggle_light 对已破坏者返回 False）；破坏也可作用于「已关灯」的房间
+                  ⇒ 永久黑暗、不可恢复；换层（load_level）重置 destroyed_lights。
 """
 from __future__ import annotations
 from typing import NamedTuple
@@ -91,6 +97,12 @@ DECOY_KEY = "decoy"            # 诱饵道具的 key（**不在** ITEM_KEYS 掉�
 # 主题：蛛网射中天花板灯的拉链——拉一下关（变暗）、再拉一下开（恢复），把静态光源变成玩家工具。
 WEB_LIGHT_RANGE = 6            # 蛛网射灯开关的射程（切比雪夫，含脚下；与 DECOY_RANGE 同值、比视野 8 短）
 NOISE_TOGGLE_LIGHT = 3         # 灯开关拉链的轻响（声源在**灯处**，比蛛网拳 6 轻、比倒挂突袭 2 略响）
+
+# M16 可破坏的灯（一条常量，确定性常数，不掷骰 ⇒ 不扰动随机序列，#2/#16）
+# 主题：蛛网带着冲量甩过去「啪」地射碎天花板灯泡——玻璃碎裂的轻响；声源在灯处（不在玩家处）⇒ 调虎离山成立。
+# 响度刻意与 NOISE_TOGGLE_LIGHT=3 持平：既可让「已验证的 --light --stealth 演示」通关行为不变，
+# 也符合「灯泡碎裂和拉链轻响同属轻微动静」的直觉；如需更响可在 ADR-012 评估上调。
+NOISE_SHATTER_BULB = 3
 
 # M4 道具与背包（蜘蛛侠主题：梅姨的爱心便当、备用蛛网芯、斯塔克的纳米科技）
 INVENTORY_CAPACITY = 5         # 不变量 #5：背包容量上限
@@ -261,6 +273,10 @@ class Game:
         # toggle_light 射中灯的拉链翻转该集合；_light_sources 跳过里面的房间 ⇒ 关灯变暗。
         # 换层（load_level）清空：新楼层 = 新房间 = 新灯。纯状态、不消耗 RandomSource（#15）。
         self.switched_lights: set[tuple[int, int]] = set()
+        # M16 可破坏的灯状态：destroyed_lights 是「已被蛛网射碎灯泡的房间中心坐标」集合（默认空 = 所有灯完好）。
+        # destroy_light 射碎灯泡后加入该集合；_light_sources 同时跳过它与 switched_lights ⇒ 房间彻底黑暗、不可恢复。
+        # 换层（load_level）清空：新楼层 = 新房间 = 新灯泡。纯状态、不消耗 RandomSource（#16）。
+        self.destroyed_lights: set[tuple[int, int]] = set()
         # M2 玩家状态（跨层保留：HP / 背包 / 纳米加成）
         self.player_max_hp = PLAYER_MAX_HP
         self.player_hp = PLAYER_MAX_HP
@@ -887,6 +903,7 @@ class Game:
         """
         self.explored = set()  # 换层即失忆：上一层的地形记忆对新楼层无意义
         self.switched_lights = set()  # M14：新楼层 = 新房间 = 新灯（关灯状态不跨层）
+        self.destroyed_lights = set()  # M16：新楼层 = 新房间 = 新灯泡（碎灯状态不跨层）
         self.grid = [list(row) for row in level.grid]
         self.height = level.height
         self.width = level.width
@@ -1008,10 +1025,13 @@ class Game:
         动态光源（FLASHLIGHT_RADIUS）；手电默认不装备 ⇒ 列表与 M11 完全一致（#13）。
         M14：switched_lights 里的房间中心跳过——蛛网拉链把灯关了，该房间不再有光源
         （关灯只移除光源、不新增 ⇒ 房间变暗、走廊失去溢光；光照场只变暗或恢复，#12/#15）。
+        M16：destroyed_lights 里的房间中心也跳过——灯泡被蛛网射碎，比关灯更彻底（永久黑暗、不可恢复），
+        同样只移除光源、不新增 ⇒ 光照场只变暗、有效半径恒 ≤ SIGHT_RADIUS(8)，#9/#12/#14 对称硬性质不破。
         """
         sources = [(r.center[0], r.center[1], ROOM_LIGHT_RADIUS)
                    for r in self.rooms
-                   if r.center not in self.switched_lights]
+                   if r.center not in self.switched_lights
+                   and r.center not in self.destroyed_lights]
         if self.light_enabled:
             sources.append((self.px, self.py, PLAYER_GLOW_RADIUS))
             if self.flashlight_on:
@@ -1067,8 +1087,11 @@ class Game:
           3) 切比雪夫距离 ≤ WEB_LIGHT_RANGE——蛛网走直线、射程有限（含脚下：站在灯正下方
              伸手就能够到，与 can_throw「甩出去必须离开自己」不同——射灯不是甩东西）；
           4) 玩家**看得见灯**（复用 M6 的 has_line_of_sight）——蛛网走直线、遇墙即断。
+        M16：已被射碎的灯泡（destroyed_lights）无法再 toggle——碎了就没了开关也无意义。
         """
         if not self.light_enabled:
+            return False
+        if (x, y) in self.destroyed_lights:
             return False
         if not any(r.center == (x, y) for r in self.rooms):
             return False
@@ -1102,8 +1125,58 @@ class Game:
         return True
 
     def light_is_on(self, x: int, y: int) -> bool:
-        """(x,y) 处的房间灯是否亮着（纯查询，不改状态）。非房间中心恒返回 True（无灯可关）。"""
-        return (x, y) not in self.switched_lights
+        """(x,y) 处的房间灯是否亮着（纯查询，不改状态）。非房间中心恒返回 True（无灯可关/可碎）。"""
+        return (x, y) not in self.switched_lights and (x, y) not in self.destroyed_lights
+
+    # ---------- M16 可破坏的灯（蛛网射碎灯泡）----------
+    # 不变量 #16：破坏是纯几何（fov.has_line_of_sight + 射程 + 房间中心判定），
+    #             不消耗 RandomSource ⇒ 不扰动战斗/掉落/生成的随机序列；
+    #             破坏只移除光源（_light_sources 跳过 destroyed_lights）⇒ 光照场只变暗、有效半径恒 ≤ SIGHT_RADIUS(8)
+    #             ⇒ #9/#12/#14 对称硬性质不破；破坏的灯不再可 toggle（can_toggle_light 返回 False）；
+    #             破坏也可作用于已关灯（switched）的房间 ⇒ 永久黑暗、不可恢复；换层（load_level）重置。
+    # 设计要点（ADR-012）：灯泡是物理实体——蛛网带着冲量甩过去「啪」地碎掉，
+    #             比 M14 的「拉链翻开关」更彻底：碎了就没了，没有「再拉一下开回来」的选项。
+    #             碎裂的轻响从**灯处**传出（不在玩家处）⇒ 调虎离山成立（与 M14 拉链轻响同原则）。
+    def can_destroy_light(self, x: int, y: int) -> bool:
+        """蛛网能否射碎 (x,y) 处的灯泡（纯几何、零随机，不变量 #16）。
+
+        五条硬约束（比 M14 的 can_toggle_light 多一条「尚未被破坏」）：
+          1) 光照已开启——光照关掉时没有灯可碎（light=False ⇒ 恒返回 False、no-op，与 M1~M15 一致）；
+          2) (x,y) 是某房间的中心——灯泡装在天花板中央（M11 光源位置 = room.center）；
+          3) 切比雪夫距离 ≤ WEB_LIGHT_RANGE——蛛网射程有限（含脚下：站在灯正下方伸手就能够到）；
+          4) 玩家**看得见灯**（复用 M6 的 has_line_of_sight）——蛛网走直线、遇墙即断；
+          5) 该灯**尚未被破坏**——碎了的灯泡没东西再碎（也意味着不可重复消耗回合）。
+        """
+        if not self.light_enabled:
+            return False
+        if (x, y) in self.destroyed_lights:
+            return False
+        if not any(r.center == (x, y) for r in self.rooms):
+            return False
+        if max(abs(x - self.px), abs(y - self.py)) > WEB_LIGHT_RANGE:
+            return False
+        return has_line_of_sight(self.grid, (self.px, self.py), (x, y))
+
+    def destroy_light(self, x: int, y: int) -> bool:
+        """蛛网射碎 (x,y) 处的灯泡，一次性不可逆（纯几何、零随机，不变量 #16）。
+
+        碎裂 ⇒ 该房间光源被永久移除 ⇒ 房间彻底黑暗（M11 暗处缩短怪物感知 +
+        M13 暗处缩短玩家视野——双刃：你与怪都成了近视眼，但暗处你更难被发现）；
+        若灯此前被关过（在 switched_lights 里），一并移除该无意义状态（碎了就无所谓开关了）。
+        M8 联动：碎裂的轻响（NOISE_SHATTER_BULB）从**灯处**传出（不是玩家处）⇒ 调虎离山成立。
+        返回是否破坏成功（光照关 / 非房间中心 / 看不见 / 射程外 / 已破坏 ⇒ False，不改状态）。
+        换层（descend → load_level）清空 destroyed_lights（新楼层 = 新房间 = 新灯泡）。
+        """
+        if not self.can_destroy_light(x, y):
+            return False
+        self.destroyed_lights.add((x, y))
+        self.switched_lights.discard((x, y))  # 碎了就不必再记「关灯」状态
+        # 重算光照场 + 可见集合（update_fov 内部先 update_light 再算 visible，幂等、纯几何零随机）
+        self.update_fov()
+        # M8：碎裂轻响从灯处传出——声源不在玩家脚下 ⇒ 调虎离山成立
+        # （听觉关闭时 emit_noise 是空操作、返回空表，M1~M15 行为一字节不变，#10）
+        self.emit_noise(x, y, NOISE_SHATTER_BULB)
+        return True
 
     def is_visible(self, x: int, y: int) -> bool:
         return (x, y) in self.visible
