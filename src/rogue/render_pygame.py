@@ -70,6 +70,40 @@ TILES_DIR = pathlib.Path(__file__).resolve().parents[2] / "tiles"
 # main.py 只在 --gui 分支 import 本模块，故 gate 不传 --gui 时不强制 pygame。
 import pygame
 
+
+class _NullFont:
+    """字体完全不可用时的最小兜底：render 返回 1×1 透明面、get_height 给最小高度。
+
+    保证渲染器在「无 SysFont 也无内置默认字体」的极端环境（如某些 wasm 构建）下
+    任何 `self.font.render(...)` 调用都不抛 AttributeError/异常，避免灰屏。
+    """
+
+    def __init__(self, size: int):
+        self._size = max(1, int(size))
+
+    def render(self, text, antialias, color, *args, **kwargs):
+        return pygame.Surface((self._size, self._size), pygame.SRCALPHA)
+
+    def get_height(self) -> int:
+        return self._size
+
+
+def _make_font(names, size: int):
+    """返回可用字体：优先 SysFont，其次内置默认 Font(None)，再不行返回 _NullFont 桩。
+
+    永不抛异常——这是 WASM/缺字体环境下防止渲染器构造失败、进而灰屏的关键兜底。
+    """
+    try:
+        return pygame.font.SysFont(names, size)
+    except Exception:
+        pass
+    try:
+        return pygame.font.Font(None, size)
+    except Exception:
+        pass
+    return _NullFont(size)
+
+
 # ---- 调色板（镜像 src/rogue/color.py 的 GLYPH_COLORS 语义）----
 # 字形 → RGB：@红 / M品红 / m暗品红 / ~蓝 / ?青 / !黄 / >绿 / #暗灰 / =黄
 # 注意：下面三行实体字形颜色是 M22 测试钉死的字面值，必须保持（不变量 #22/#23 契约）。
@@ -288,15 +322,12 @@ class PygameRenderer:
         self.screen = pygame.display.set_mode((w, h))
         pygame.display.set_caption(caption)
         # 优先中文字体（Windows 常见微软雅黑）；wasm/浏览器或缺字体时回退到内置默认字体，
-        # 保证任何环境都能构造渲染器（不依赖特定字体存在，#22/#23 纯净性延伸）。
+        # 再不行用 _NullFont 桩（render 返回透明小面），保证构造渲染器与任何 .render 调用都不崩，
+        # 不依赖特定字体存在（#22/#23 纯净性延伸；WASM 字体缺失也不致灰屏）。
         _font_names = ["Microsoft YaHei", "Microsoft YaHei UI", "Consolas",
                        "DejaVu Sans", "SimHei", "monospace"]
-        try:
-            self.font = pygame.font.SysFont(_font_names, max(13, cell_size - 9))
-            self.big_font = pygame.font.SysFont(_font_names, 30)
-        except Exception:
-            self.font = pygame.font.Font(None, max(13, cell_size - 9))
-            self.big_font = pygame.font.Font(None, 30)
+        self.font = _make_font(_font_names, max(13, cell_size - 9))
+        self.big_font = _make_font(_font_names, 30)
         self.detail = cell_size >= 16     # 小 cell（headless 测试）跳过精细纹理
         self._build_tiles()
         self._init_audio()
