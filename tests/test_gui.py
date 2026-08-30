@@ -153,5 +153,88 @@ class TestRendererAndParity(unittest.TestCase):
         self.assertEqual(len(g_term.inventory), len(g_gui.inventory))
 
 
+@unittest.skipUnless(_HAVE_GUI, "pygame 未安装（headless 跳过）")
+class TestM23Effects(unittest.TestCase):
+    def setUp(self):
+        self.r = PygameRenderer(_new_game(), cell_size=28)
+
+    def test_spawn_web_effect(self):
+        self.r._spawn_web(1, 1, 5, 3)
+        self.assertEqual(len(self.r.effects), 1)
+        e = self.r.effects[0]
+        self.assertEqual(e["kind"], "web")
+        self.assertEqual((e["gx0"], e["gy0"], e["gx1"], e["gy1"]), (1, 1, 5, 3))
+        self.assertEqual(e["ttl"], e["max"])
+
+    def test_flash_effect(self):
+        self.r._spawn_flash(2, 2)
+        self.assertEqual(self.r.effects[0]["kind"], "flash")
+
+    def test_effect_decay_removes(self):
+        self.r._spawn_web(0, 0, 1, 1)
+        ttl0 = self.r.effects[0]["ttl"]
+        for _ in range(ttl0 + 5):
+            self.r._update_effects()
+        self.assertEqual(len(self.r.effects), 0)
+
+    def test_detect_attack_finds_damaged(self):
+        g = self.r.game
+        alive = [m for m in g.monsters if m.alive]
+        if not alive:
+            self.skipTest("本 seed 开局无存活怪物")
+        m = alive[0]
+        prev = {id(m): (m.x, m.y, m.hp)}
+        m.hp -= 1
+        found = self.r._detect_attack(prev)
+        self.assertIsNotNone(found)
+        self.assertEqual(found, (m.x, m.y))
+
+    def test_detect_attack_none_when_untouched(self):
+        g = self.r.game
+        prev = {id(m): (m.x, m.y, m.hp) for m in g.monsters if m.alive}
+        self.assertIsNone(self.r._detect_attack(prev))
+
+
+@unittest.skipUnless(_HAVE_GUI, "pygame 未安装（headless 跳过）")
+class TestM23ThemedDraw(unittest.TestCase):
+    def test_draw_full_scene_no_error(self):
+        r = PygameRenderer(_new_game(), cell_size=28)
+        from rogue.game import Item
+        g = r.game
+        placed = False
+        for y in range(g.height):
+            for x in range(g.width):
+                if g.grid[y][x] == "." and (x, y) != (g.px, g.py):
+                    g.items.append(Item("web_cartridge", x, y))
+                    placed = True
+                    break
+            if placed:
+                break
+        r.draw()                       # 不应抛错
+        r.help_shown = True
+        r.draw()
+
+    def test_glyph_helpers_no_error(self):
+        r = PygameRenderer(_new_game(), cell_size=28)
+        r._draw_spider_sense(0, 0)
+        r._draw_spidey(1, 1, True)
+        r._draw_enemy(2, 2, "M", True, None)
+        r._draw_enemy(2, 3, "m", True, None)
+        r._draw_enemy(2, 4, "~", True, None)
+        r._draw_item(3, 3, "sandwich", True)
+        r._draw_item(3, 4, "nano_boost", True)
+        r._draw_item(3, 5, "decoy", True)
+        r._draw_stairs(4, 4, True)
+        r._draw_switch(5, 5, True)
+        r._draw_hud()
+
+    def test_themed_tiles_built(self):
+        r = PygameRenderer(_new_game(), cell_size=28)
+        self.assertTrue(r.detail)
+        for name in ("tile_floor", "tile_floor_dim", "tile_wall",
+                     "tile_wall_dim", "tile_unseen"):
+            self.assertIsNotNone(getattr(r, name))
+
+
 if __name__ == "__main__":
     unittest.main()
