@@ -64,15 +64,21 @@ pip install -r requirements-web.txt
 # 2) 本地预览：自动起静态服务器 + websocket 中继，浏览器打开它提示的地址
 pygbag web.py
 #   或等价地用仓库脚本：build_wasm.bat（Windows）/ build_wasm.sh（Linux·macOS）
+#   双击即玩入口：play_web.bat（Windows）/ play_web.sh（Linux·macOS）
 
 # 3) 产出可托管的静态包：build/web/（丢到任意静态服务器即可）
 pygbag --build web.py
 ```
 
 网页版与桌面 `--gui` 控制完全一致：WASD/方向键 移动（撞怪=攻击）· G 拾取 · 1-5 用道具 ·
-E 蛛网摆荡突袭 · F 手电 · > 下潜 · 空格/回车 等待 · ? 帮助 · Q 退出。
+E 蛛网摆荡突袭 · F 手电 · > 下潜 · 空格/回车 等待 · ? 帮助 · Q 退出 · **S 存档 · L 读档**。
 默认开「全开」展示（视野/潜行/听觉/光照/手电/开关/Boss）；可用 `--no-fog`/`--no-boss` 等旗标收窄。
 `web.py` 复用 `main._handle_key` 与 `Game.procedural`，零改核心、确定性不变（不变量 #28）。
+
+> **存档（M29）**：网页版按 S 存档落到浏览器原生 `localStorage`（固定键
+> `spiderman_roguelike_save_v1`），跨刷新稳健保留、键空间独立于 pygbag 的 `/data`；
+> 非 pygbag 环境（如 `python web.py` 本地预览）回退到仓库目录 `savegame.json`。
+> 序列化复用 M26 的 `Game.to_dict`/`apply_state`，确定性等价、桌面与 M26 逐字节一致（不变量 #29）。
 
 ## 2. 在新工作空间开新会话时，贴这段话
 
