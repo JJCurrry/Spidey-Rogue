@@ -34,7 +34,8 @@
 - M17 环境光照场与完整光照场分离（已完成，见 `docs/工单/T-017-环境光照场分离.md` / `docs/adr/ADR-013-环境光照场分离.md`）：`update_light()` 同源、幂等重算两份场——`ambient_field`（仅房间灯，不含玩家微光/手电，静态环境照明）与 `light_field`（房间灯 + 微光 + 手电，完整场）；新增 `_ambient_sources` 与只读查询 `ambient_level_at`（与 `light_level_at` 对称，光照关闭恒「明亮」）；**默认所有玩法/渲染判定仍走完整场** ⇒ 行为零回归（gate 432 → 443，演示逐字节一致，不变量 #17）
 - M18 怪物感知改用环境场（已完成，见 `docs/工单/T-018-怪物感知改用环境场.md` / `docs/adr/ADR-014-怪物感知改用环境场.md`）：M11 怪物感知半径判定从完整场 `light_level_at` 改走「怪物感知光场」`monster_light_level_at`（**仅房间灯 + 随身手电，不含玩家被动微光**），修正「被动微光把附近暗处怪照成近视眼反面」的隐性副作用；新增 `_monster_light_sources` / `monster_light_field` / `monster_light_level_at`，由 `update_light()` 同源、幂等重算；有效半径恒 ≤ `MONSTER_SIGHT_RADIUS` ⇒ #9 对称硬性质不破、手电双刃（M12）保留；`light=False` 三条演示与 M17 逐字节一致、`--light`/`--flashlight` 演示仍通关（gate 443 → 445，不变量 #18）
 - M19 灯开关独立实体（已完成，见 `docs/工单/T-019-灯开关独立实体.md` / `docs/adr/ADR-015-灯开关独立实体.md`）：墙边开关 `LightSwitch` 实体与天花板灯具 `room.center` 分离的独立控制手柄；**保留 M14 `toggle_light` / M16 `destroy_light` API 不动**，平行新增 switch API（`switch_at` / `can_toggle_switch` / `toggle_switch` / `can_destroy_switch` / `destroy_switch` / `switch_light_is_on`，纯几何零随机、默认关闭）翻同一份 `switched_lights`/`destroyed_lights`（按 `room.center` 记录）⇒ 完全复用 M14/M16 光照场逻辑、行为零回归；几何约束瞄准「开关格」的 `has_line_of_sight` + 切比雪夫 ≤ `WEB_LIGHT_RANGE`；声源仍在灯具处（`NOISE_TOGGLE_LIGHT=3` / `NOISE_SHATTER_BULB=3` 从 `room.center` 传出，M8 调虎离山成立）；`main.py` 设 `switches=light`，`--light --stealth` 下 `step 0b` 改为蛛网射碎未察觉敌人所在房间**墙边开关**的灯泡（永夜摸黑接近，行为等价于 M18 射碎灯具）；`render()` 全图/迷雾画 `=`、已碎退回 `#`、不改写 world state（#8 延伸）；opt-in（`switches=False` ⇒ 默认/潜行/听觉三条演示与 M18 逐字节一致）；测试 445 例 → 478 例全绿（不变量 #19）
-- 下一步候选（M19 已完成「灯开关独立实体」；剩余一条待立项）：让光照也影响蜘蛛感应半径（SPIDER_SENSE_RADIUS=4 穿墙预警目前不受光照约束；主题上是否该受光照约束需先定调）
+- M20 光照影响蜘蛛感应半径（已完成，见 `docs/工单/T-020-光照影响蜘蛛感应半径.md` / `docs/adr/ADR-016-光照影响蜘蛛感应半径.md`）：M6 的蜘蛛感应（穿墙预警 `?`）半径原本恒为 `SPIDER_SENSE_RADIUS=4`、不受光照约束；M20 起 `light=True` 时按怪物所在格光照衰减（暗 2 / 昏暗 3 / 明 4），与 M11 怪物感知、M13 玩家视野形成「黑暗三重削弱」对称；纯几何、零随机、`fov.spider_sense_radius` 只缩短不放大、恒 ≤ 4；默认关闭（`light=False` ⇒ 半径恒 4，与 M1~M19 逐字节一致）；暗处保留最小半径 2 避免彻底无预警；`render()` 字形一字不差（#8 延伸）；测试 478 例 → 506 例全绿（不变量 #20）
+- 下一步候选（M20 已完成「光照影响蜘蛛感应半径」，核心光照/感知/视野体系 M6–M20 收尾）：**无更多接力登记项**。如需新里程碑，按流程在 `docs/工单/` + `docs/adr/` + `docs/不变量.md`（#1–#20）登记后再开工。
 
 ## 七件套索引（只放指针）
 - ① 本文档（根索引）
@@ -44,7 +45,10 @@
   `docs/adr/ADR-003-怪物感知与潜行.md`、`docs/adr/ADR-004-噪音与听觉.md`、
   `docs/adr/ADR-005-主动制造响动.md`、`docs/adr/ADR-006-ANSI颜色高亮.md`、
   `docs/adr/ADR-007-光照衰减.md`、`docs/adr/ADR-008-随身手电.md`、
-  `docs/adr/ADR-009-光照影响玩家视野.md`、`docs/adr/ADR-010-可开关的房间灯.md`
+  `docs/adr/ADR-009-光照影响玩家视野.md`、`docs/adr/ADR-010-可开关的房间灯.md`、
+  `docs/adr/ADR-011-怪物追击修正与配平.md`、`docs/adr/ADR-012-可破坏的房间灯.md`、
+  `docs/adr/ADR-013-环境光照场分离.md`、`docs/adr/ADR-014-怪物感知改用环境场.md`、
+  `docs/adr/ADR-015-灯开关独立实体.md`、`docs/adr/ADR-016-光照影响蜘蛛感应半径.md`
 - ⑤ 不变量（红线）：`docs/不变量.md`
 - ⑥ 术语表：`docs/术语表.md`
 - ⑦ 地图：`docs/地图.md`

@@ -49,7 +49,7 @@ from .tiles import (WALL, FLOOR, PLAYER, MONSTER, ITEM, STAIRS, UNSEEN, SENSE,
 from .level import Level, Room, generate_level, TUTORIAL_LEVEL_NAME
 from .fov import (SIGHT_RADIUS, SPIDER_SENSE_RADIUS, MONSTER_SIGHT_RADIUS,
                   visible_tiles, in_spider_sense, monster_can_see,
-                  has_line_of_sight)
+                  spider_sense_radius, has_line_of_sight)
 from .sound import (NOISE_COST_FLOOR, NOISE_COST_WALL, noise_field,
                     noise_reaches)
 from .light import (ROOM_LIGHT_RADIUS, PLAYER_GLOW_RADIUS, FLASHLIGHT_RADIUS,
@@ -1437,9 +1437,20 @@ class Game:
         """蜘蛛感应：半径内（穿墙）能感到轮廓的存活怪物，含已经看得见的。
 
         半径 SPIDER_SENSE_RADIUS 刻意小于视野半径 SIGHT_RADIUS——是预警不是透视。
+        M20：光照开启时，感应半径随**目标（威胁）所在格光照**衰减（暗 2 / 昏暗 3 / 明 4），
+             与 M11 怪物感知、M13 玩家视野形成「黑暗三重削弱」对称；
+             暗处仍保留最小半径 2，避免彻底无预警（只缩短、不放大，恒 ≤ SPIDER_SENSE_RADIUS）。
+             光照关闭时半径恒为 SPIDER_SENSE_RADIUS（与 M1~M19 逐字节一致，零回归）。
         """
-        return [m for m in self.monsters
-                if m.alive and in_spider_sense((self.px, self.py), (m.x, m.y))]
+        out = []
+        for m in self.monsters:
+            if not m.alive:
+                continue
+            r = (spider_sense_radius(self.light_level_at(m.x, m.y))
+                 if self.light_enabled else SPIDER_SENSE_RADIUS)
+            if in_spider_sense((self.px, self.py), (m.x, m.y), radius=r):
+                out.append(m)
+        return out
 
     # ---------- 渲染 ----------
     def render(self) -> str:

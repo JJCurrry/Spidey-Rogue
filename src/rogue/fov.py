@@ -1,4 +1,4 @@
-"""M6 视野 / 光照（蜘蛛感应版）+ M7 怪物感知几何 + M13 光照影响玩家自身视野。
+"""M6 视野 / 光照（蜘蛛感应版）+ M7 怪物感知几何 + M13 光照影响玩家自身视野 + M20 光照影响蜘蛛感应半径。
 
 主题：MCU 荷兰弟版蜘蛛侠——视野即「蜘蛛感应（Spider-Sense）」：
      视线内看得清（画实体），墙后的近处威胁只有轮廓（画 `?`）。
@@ -7,6 +7,10 @@ M7：怪物用同一套视线几何判断「有没有发现蜘蛛侠」（`monst
 M13：光照开启时玩家自己的视野半径也随光照衰减（暗处看不远、亮处不变），
      与 M11「暗处缩短怪物感知」对称；逐格按**目标格光照**决定视野半径
      （亮处的东西容易被看见、暗处的东西难被看见）⇒ #9 硬性质不破。
+M20：光照开启时蜘蛛感应（预警）半径也随**目标格光照**衰减（暗 2 / 昏暗 3 / 明 4），
+     与 M11 怪物感知、M13 玩家视野形成「黑暗三重削弱」对称；暗处仍保留最小半径 2
+     （避免彻底无预警），只缩短、不放大、恒 ≤ `SPIDER_SENSE_RADIUS`(4) ⇒ #9 对称硬性质不破。
+     光照关闭时半径恒为 `SPIDER_SENSE_RADIUS`（与 M1~M19 逐字节一致）。
 
 不变量 #1：视野是**纯几何**计算，不含任何随机，本模块也不引入随机模块
           （seed-guard 拦截）。
@@ -28,6 +32,13 @@ from .level import Room
 # ---- 视野参数（常量，不做调参入口）----
 SIGHT_RADIUS = 8           # 视野半径（欧氏距离，超出即不可见）
 SPIDER_SENSE_RADIUS = 4    # 蜘蛛感应半径（切比雪夫距离，穿墙、只给轮廓）
+# M20 蜘蛛感应半径随光照衰减的档位（与 light.py 的光照等级整数对应：0=暗 1=昏暗 2=明）。
+# 与 M11 怪物感知、M13 玩家视野同一哲学——黑暗削弱「感知」，只缩短不放大，
+# 恒 ≤ SPIDER_SENSE_RADIUS(4) ⇒ 对称硬性质「怪看得见你 ⇒ 你看得见它」不破。
+# 暗处仍保留最小半径 2，避免彻底无预警（超能力仍有兜底）。
+SPIDER_SENSE_DARK = 2      # 全黑处蜘蛛感应只预警 2 格
+SPIDER_SENSE_DIM = 3       # 昏暗处预警 3 格
+# 明亮处蜘蛛感应 = SPIDER_SENSE_RADIUS(4)，无需另设常量
 # M7 怪物感知半径：刻意比玩家视野小 1 ⇒ 玩家总能先发现敌人，潜行才有操作空间
 MONSTER_SIGHT_RADIUS = 7
 
@@ -55,6 +66,22 @@ def player_sight_radius(light_lvl: int, base: int = SIGHT_RADIUS) -> int:
         return PLAYER_SIGHT_DARK
     if light_lvl == 1:       # LIGHT_LEVEL_DIM
         return PLAYER_SIGHT_DIM
+    return base              # LIGHT_LEVEL_LIT
+
+
+def spider_sense_radius(light_lvl: int, base: int = SPIDER_SENSE_RADIUS) -> int:
+    """M20：蜘蛛感应半径随目标格光照衰减（纯函数，只缩短不放大，不变量 #9/#20）。
+
+    永远 ≤ base（= SPIDER_SENSE_RADIUS=4）：暗处近视、亮处正常。
+    光照等级整数与 light.py 的 LIGHT_LEVEL_* 对应（0=暗 / 1=昏暗 / 2=明）。
+    与 M11 怪物感知（monster_sight_radius）、M13 玩家视野（player_sight_radius）同一哲学——
+    黑暗削弱「感知」、只缩短不放大，对称硬性质「怪看得见你 ⇒ 你看得见它」不破
+    （感应半径恒 ≤ 视野/感知半径）。
+    """
+    if light_lvl <= 0:       # LIGHT_LEVEL_DARK
+        return SPIDER_SENSE_DARK
+    if light_lvl == 1:       # LIGHT_LEVEL_DIM
+        return SPIDER_SENSE_DIM
     return base              # LIGHT_LEVEL_LIT
 
 
