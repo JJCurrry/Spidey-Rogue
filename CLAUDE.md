@@ -8,7 +8,7 @@
 终端（ASCII）Roguelike 地牢探险；以「最新蜘蛛侠（Spider-Man，MCU 荷兰弟 / Tom Holland 风格）」为主角与美术基调（红蓝战衣、蛛网摆荡、纽约都市地牢）。一个人用标准 AI Coding 方式持续迭代。
 
 ## 技术栈（决策见 ADR-001）
-- 语言：Python 3.11+；测试：unittest（零依赖）；渲染：终端 ASCII
+- 语言：Python 3.11+；测试：unittest（零依赖）；渲染：核心 ASCII 模型 + Pygame GUI 视图层（M22 起，`--gui` 进窗口，首个第三方依赖 pygame）；终端 ASCII 仍保留作 `--play` 回归基线
 - 随机：**必须经 Seed 注入**（见 `docs/不变量.md` #1）
 - 视野（M6）：纯几何、零随机；**默认关闭**，`Game(..., fov=True)` 显式开启（见 `docs/不变量.md` #8）
 - 潜行（M7）：怪物感知是纯几何、零随机、双向视线；**默认关闭**，`Game(..., stealth=True)` 显式开启（见 `docs/不变量.md` #9）
@@ -36,7 +36,8 @@
 - M19 灯开关独立实体（已完成，见 `docs/工单/T-019-灯开关独立实体.md` / `docs/adr/ADR-015-灯开关独立实体.md`）：墙边开关 `LightSwitch` 实体与天花板灯具 `room.center` 分离的独立控制手柄；**保留 M14 `toggle_light` / M16 `destroy_light` API 不动**，平行新增 switch API（`switch_at` / `can_toggle_switch` / `toggle_switch` / `can_destroy_switch` / `destroy_switch` / `switch_light_is_on`，纯几何零随机、默认关闭）翻同一份 `switched_lights`/`destroyed_lights`（按 `room.center` 记录）⇒ 完全复用 M14/M16 光照场逻辑、行为零回归；几何约束瞄准「开关格」的 `has_line_of_sight` + 切比雪夫 ≤ `WEB_LIGHT_RANGE`；声源仍在灯具处（`NOISE_TOGGLE_LIGHT=3` / `NOISE_SHATTER_BULB=3` 从 `room.center` 传出，M8 调虎离山成立）；`main.py` 设 `switches=light`，`--light --stealth` 下 `step 0b` 改为蛛网射碎未察觉敌人所在房间**墙边开关**的灯泡（永夜摸黑接近，行为等价于 M18 射碎灯具）；`render()` 全图/迷雾画 `=`、已碎退回 `#`、不改写 world state（#8 延伸）；opt-in（`switches=False` ⇒ 默认/潜行/听觉三条演示与 M18 逐字节一致）；测试 445 例 → 478 例全绿（不变量 #19）
 - M20 光照影响蜘蛛感应半径（已完成，见 `docs/工单/T-020-光照影响蜘蛛感应半径.md` / `docs/adr/ADR-016-光照影响蜘蛛感应半径.md`）：M6 的蜘蛛感应（穿墙预警 `?`）半径原本恒为 `SPIDER_SENSE_RADIUS=4`、不受光照约束；M20 起 `light=True` 时按怪物所在格光照衰减（暗 2 / 昏暗 3 / 明 4），与 M11 怪物感知、M13 玩家视野形成「黑暗三重削弱」对称；纯几何、零随机、`fov.spider_sense_radius` 只缩短不放大、恒 ≤ 4；默认关闭（`light=False` ⇒ 半径恒 4，与 M1~M19 逐字节一致）；暗处保留最小半径 2 避免彻底无预警；`render()` 字形一字不差（#8 延伸）；测试 478 例 → 506 例全绿（不变量 #20）
 - M21 可键盘操作玩法（已完成，见 `docs/工单/T-021-可键盘操作玩法.md` / `docs/adr/ADR-017-可键盘操作玩法.md`）：把「只能看脚本自动驾驶 demo」变成「能自己上手玩、开发中可实测」——`main.py` 新增 `_handle_key`（按键→动作，撞怪即攻击 bump-to-attack、`g` 拾取、`1~5` 用道具、`e` 蛛网摆荡突袭、`f` 手电、`>` 下潜、空格/`.`/回车等待、`?` 帮助、`q` 退出）+ `_player_interactive`（渲染→读键→执行→怪物回合，判定 win/dead/quit）+ `main()` 的 `--play` 开关（默认仍走 `_player_act` 自动驾驶 demo，零回归）；纯几何、零随机（只调 Game 既有方法）、move 保持 4 向（#4）、有效动作耗回合/无效键不耗（#2）、操作说明内置；测试 506 例 → 521 例全绿（不变量 #21）
-- 下一步候选（M21 已完成「可键盘操作玩法」，游戏从只能看 demo 变为能手动游玩；M21 未覆盖的交互细化方向）：如需新里程碑，按流程在 `docs/工单/` + `docs/adr/` + `docs/不变量.md`（#1–#21）登记后再开工。候选方向：① 交互式射灯/碎灯/墙边开关的目标选择 UI（M14/M16/M19 的玩家可控版）；② 存档/读档（save/load）；③ Boss 战与胜利条件闭环（终局收口成一局完整胜负）；④ 更多蜘蛛侠招式（AoE 蛛网束缚 / 可指定落点的摆荡位移）。
+- M22 Pygame GUI 渲染层（已完成，见 `docs/工单/T-022-GUI渲染层.md` / `docs/adr/ADR-018-GUI渲染层.md`）：把「ASCII 终端视图」换成「真实 Pygame 窗口」——新增 `src/rogue/render_pygame.py` 的 `PygameRenderer`（只读 `Game` 公开状态、逐帧画窗口、主循环 `run(_handle_key)` 与 `--play` 终端路径同构），`main.py` 新增 `--gui` 开关（延迟 import，opt-in），`--play` 终端模式保留作 headless 回归基线；引入首个第三方依赖 `pygame`（`requirements.txt`）；纯几何零随机、不改 `Game` 一字（#1/#2/#8 延伸），GUI 与终端对同 seed+同输入序列产生同结果（#2，机器判定 `tests/test_gui.py`）；测试 521 例 → 533 例全绿（不变量 #22）
+- 下一步候选（M22 已完成「Pygame GUI 渲染层」，游戏从 ASCII 终端变成真实窗口；M21 的交互控制 + M22 的窗口渲染已闭环「能手动玩」）：如需新里程碑，按流程在 `docs/工单/` + `docs/adr/` + `docs/不变量.md`（#1–#22）登记后再开工。候选方向：① **GUI 美术升级（M23）**：把纯色块换成 Spider-Man 主题 Sprite 贴图（`tiles/*.png`）+ 攻击/移动动画 + 音效，`tile_color` 字形→RGB 映射点改为字形→surface 即可，核心零改动；② 交互式射灯/碎灯/墙边开关的目标选择 UI（M14/M16/M19 的玩家可控版）；③ 存档/读档（save/load）；④ Boss 战与胜利条件闭环；⑤ 更多蜘蛛侠招式（AoE 蛛网束缚 / 可指定落点摆荡位移）；⑥ 网页化（Pygbag 把 Pygame 打包成 wasm，零改核心）。
 
 ## 七件套索引（只放指针）
 - ① 本文档（根索引）

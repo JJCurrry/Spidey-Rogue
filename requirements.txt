@@ -1,0 +1,4 @@
+# 首个第三方依赖（M22 GUI 渲染层引入）
+# 安装：pip install -r requirements.txt
+# 运行窗口模式：python main.py --gui
+pygame>=2.5

@@ -534,6 +534,7 @@ def main() -> None:
     flashlight = "--flashlight" in args    # M12：随身手电默认不装备
     light = "--light" in args or flashlight   # M11：光照衰减默认关闭；--flashlight 隐含 --light
     play = "--play" in args                # M21：键盘操作模式（opt-in，默认仍是脚本自动驾驶 demo）
+    gui = "--gui" in args                  # M22：Pygame 窗口模式（opt-in，替换 --play 的 ASCII 视图层）
     # 听觉只在「怪物要被发现才追你」时才有意义 ⇒ --noise 隐含 --stealth
     stealth = "--stealth" in args or noise
     # M10：终端上色（纯展示层，不改字形/状态）。默认 TTY 自动开，可用 --no-color / --color 强制。
@@ -564,6 +565,14 @@ def main() -> None:
     if flashlight:
         print("手电模式：蛛网发射器探照灯已装备——开灯照亮四周、关灯摸黑潜行；"
               "演示里会「潜行摸黑、交手开灯」地自动开关。")
+    if gui:
+        print("窗口模式：启动 Pygame 渲染器……（关闭窗口或按 Q 退出）")
+        from rogue.render_pygame import PygameRenderer
+        renderer = PygameRenderer(game, cell_size=24, max_depth=MAX_DEPTH,
+                                  help_text=CONTROLS_HELP)
+        ending = renderer.run(_handle_key)
+        print(_ending_banner(ending, game))
+        return
     if play:
         print("键盘操作模式：你来控制蜘蛛侠。操作说明见下方，随时按 ? 查看、Q 退出。")
         ending = _player_interactive(game, color_on)
