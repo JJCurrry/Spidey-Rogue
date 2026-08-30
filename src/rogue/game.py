@@ -132,13 +132,17 @@ class MonsterKind(NamedTuple):
 
 # 怪物登记表（蜘蛛侠 MCU 荷兰弟版：街头恶徒 + 经典反派）
 # 攻击值刻意压低：M3 规则是「相邻即每回合挨打」，攻高会让换血变得无法承受
+# M15 配平：追击修正（_step_toward 改走 close_in=True）让怪物更可靠地贴上玩家，
+# 整体威胁上升，故攻击值各降 1（1~3 → 0~2）。实测只修不配平会从 26/30 掉到 22/30，
+# 配平后回到 ~28/30。0 伤害的「街头小混混 / 迷途无人机」是 harmless fodder——
+# 仍占位、可被杀死、清场才能下潜，只是挠你一下不破防（主题：街头小混混够不到你）。
 MONSTER_TABLE = (
-    MonsterKind("街头小混混", 8, 1, "chase", 1),
-    MonsterKind("迷途无人机", 5, 1, "wander", 1),
-    MonsterKind("神秘客幻象", 7, 2, "wander", 3),
-    MonsterKind("奥斯本实验体", 12, 2, "chase", 3),
-    MonsterKind("电光人残党", 9, 3, "wander", 5),
-    MonsterKind("沙人分身", 14, 2, "chase", 5),
+    MonsterKind("街头小混混", 8, 0, "chase", 1),
+    MonsterKind("迷途无人机", 5, 0, "wander", 1),
+    MonsterKind("神秘客幻象", 7, 1, "wander", 3),
+    MonsterKind("奥斯本实验体", 12, 1, "chase", 3),
+    MonsterKind("电光人残党", 9, 2, "wander", 5),
+    MonsterKind("沙人分身", 14, 1, "chase", 5),
 )
 
 
@@ -558,8 +562,13 @@ class Game:
         return True
 
     def _step_toward(self, candidates: list[tuple[int, int]]) -> tuple[int, int] | None:
-        """在候选格中选曼哈顿距离玩家最近者（贪心追击）；平局取候选列表靠前者（确定性）。"""
-        return self._step_toward_point(candidates, (self.px, self.py))
+        """默认 chase（潜行关闭）的贪心追击：用切比雪夫二次关键字避免平局时轴向往复（M15 修正）。
+
+        此前只比曼哈顿距离、平局按方向顺序裁决，会挑中「切比雪夫距离没缩小」的那一步，
+        于是玩家沿轴向往复时怪锁在同一条轴上震荡、永不贴上（演示 seed 19 实测锁死 30+ 回合）。
+        M15 起与潜行分支统一走 ``close_in=True``——纯几何、零随机、不消耗 rng（#2 不变）。
+        """
+        return self._step_toward_point(candidates, (self.px, self.py), close_in=True)
 
     def _step_toward_point(self, candidates: list[tuple[int, int]],
                            goal: tuple[int, int],
@@ -571,9 +580,9 @@ class Game:
         向左与向下的曼哈顿距离都是 2，贪心会随方向顺序挑到向下那一步，
         于是在两格之间来回横跳、永远贴不上来；切比雪夫更小的那一步才是真的在逼近。
 
-        只有 M7 的潜行分支需要 close_in（搜捕/回巢都要真的走拢）。
-        M3 的老追击路径保持原样：改它会改写 M1~M6 既有演示的行为，
-        而「不改写既有行为」优先于顺手修旧疾——该疾已登记为后续项。
+        M15 起默认 chase（潜行关闭）也走 close_in=True（见 ``_step_toward``）——旧路径只比曼哈顿
+        会让玩家轴向往复时怪锁轴震荡、永不贴上的 bug 一并修掉，且是已立项的 M15 里程碑
+        （不是顺手夹带），故此处改为默认也逼近。潜行分支的搜捕/回巢本就用 close_in=True。
         """
         best = None
         best_key = None
