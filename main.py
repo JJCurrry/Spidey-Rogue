@@ -6,7 +6,9 @@
 运行：python main.py（--no-fog 切回全图；--stealth 开启怪物视野与潜行；--noise 再开启听觉，
       --noise 隐含 --stealth——听觉只在「怪物需要被发现才追你」时才有意义；
       --light 开启光照衰减；--flashlight 装备随身手电（隐含 --light）；
-      --color / --no-color 控制终端上色，默认在终端（TTY）自动上色、管道/重定向下自动降级为纯文本）
+      --color / --no-color 控制终端上色，默认在终端（TTY）自动上色、管道/重定向下自动降级为纯文本；
+      --play 切换为键盘操作模式（你来控制蜘蛛侠，操作说明见游戏内，随时按 ? 查看）——
+      不加 --play 时仍是脚本自动驾驶 demo（回归/演示用，行为不变）
 
 演示流程：按 seed 程序化生成楼层 → 蜘蛛侠逐层清怪 → 走楼梯下潜（共 MAX_DEPTH 层）。
 随机只从 src/rogue/rng.py 流出（不变量 #1）；本文件不含任何随机调用。
@@ -77,6 +79,28 @@ LEGEND = ("图例：@ 蜘蛛侠 | M 已察觉你的敌人 | m 未察觉的敌人
           "? 蜘蛛感应（看不见的威胁） | ! 补给 | > 下行楼梯 | # 墙 | . 地板 | 空白 未探索")
 
 DIRS = ((0, -1), (0, 1), (-1, 0), (1, 0))
+
+# M21：可键盘操作模式的控制映射与帮助文本。
+# 移动保持 4 向（与 M1 网格一致，避免斜向穿墙角，#4）。方向键原始转义序列也纳入，
+# 但交互循环默认用 input() 读取，终端是否发转义序列取决于前端；WASD/hjkl 始终可用。
+MOVE_KEYS = {
+    "w": (0, -1), "s": (0, 1), "a": (-1, 0), "d": (1, 0),
+    "k": (0, -1), "j": (0, 1), "h": (-1, 0), "l": (1, 0),
+    "\x1b[A": (0, -1), "\x1b[B": (0, 1), "\x1b[C": (1, 0), "\x1b[D": (-1, 0),
+}
+
+CONTROLS_HELP = (
+    "=== 操作说明（键盘）===\n"
+    "移动：W/A/S/D 或 方向键 或 H/J/K/L（上下左右，4 向）\n"
+    "  撞向怪物 = 蛛网拳攻击（经典 bump-to-attack）\n"
+    "等待一回合：空格 / . / 回车\n"
+    "拾取脚下道具：G\n"
+    "使用背包第 N 格：数字 1~5（三明治=回血 / 蛛网弹=缠住最近怪 / 纳米强化剂=增伤 / 垃圾桶盖=甩响动）\n"
+    "蛛丝摆荡突袭（M7，仅潜行模式有未察觉目标时）：E\n"
+    "随身手电开关（M12，需 --flashlight）：F\n"
+    "下潜（站在 > 楼梯上）：>\n"
+    "查看本说明：?    退出：Q\n"
+)
 
 
 def _bfs(game: Game, targets, avoid_monsters: bool = True):
@@ -370,6 +394,121 @@ def _player_act(game: Game) -> str:
     return "被挡住了，原地调整姿态"
 
 
+def _handle_key(game: Game, key: str) -> tuple[bool, str]:
+    """M21：把一个按键解析为玩家动作。
+
+    返回 (acted, msg)：
+    - acted=True 表示该动作消耗了一个回合（调用方随后应跑 game.monster_turn()）；
+    - acted=False 表示无效/纯信息动作（不消耗回合，重新读取按键）。
+    - msg == "quit" 表示玩家请求退出（调用方据此结束交互循环）。
+
+    只调用 Game 的既有确定性方法（move/player_attack/web_strike/pick_up/use_item/
+    descend/toggle_flashlight），不引入任何随机 ⇒ 不变量 #2 不变；不改写渲染以外的状态 ⇒ #8 不变。
+    """
+    raw = key.strip()
+    low = raw.lower()
+    mv = MOVE_KEYS.get(raw, MOVE_KEYS.get(low))
+    if mv is not None:
+        dx, dy = mv
+        tx, ty = game.px + dx, game.py + dy
+        mon = game.monster_at(tx, ty)
+        if mon is not None:
+            dmg, dead = game.player_attack(mon)
+            verb = "倒挂突袭" if game.last_attack_sneak else "蛛网拳命中"
+            return True, (f"{verb} {mon.name}，造成 {dmg} 点伤害"
+                          + ("（倒下！）" if dead else ""))
+        if game.move(dx, dy):
+            return True, "移动"
+        return False, "撞到墙，原地不动"
+    if low == "g":
+        it = game.pick_up()
+        if it is None:
+            return False, "脚下没有可拾取的道具（或背包已满）"
+        return True, f"拾取 {it.name}"
+    if low in (" ", ".", "wait") or raw == "":
+        return True, "原地待命"
+    if low == "q":
+        return False, "quit"
+    if low == "?":
+        return False, CONTROLS_HELP
+    if low == "f":
+        if not game.flashlight_enabled:
+            return False, "未装备随身手电（用 --flashlight 启动）"
+        on = game.toggle_flashlight()
+        return True, ("打开蛛网探照灯" if on else "关掉蛛网探照灯")
+    if low == "e":
+        for m in sorted(game.unaware_monsters(),
+                        key=lambda m: (abs(m.x - game.px) + abs(m.y - game.py),
+                                       m.x, m.y)):
+            strike = game.web_strike(m)
+            if strike is not None:
+                dmg, dead = strike
+                return True, (f"蛛丝摆荡，倒挂突袭 {m.name}，造成 {dmg} 点伤害"
+                              + ("（一击放倒！）" if dead else ""))
+        return False, "附近没有可突袭的未察觉目标（或荡不过去）"
+    if low in "123456789":
+        idx = int(low) - 1
+        if idx >= len(game.inventory):
+            return False, f"背包没有第 {low} 格"
+        item = game.inventory[idx]
+        if item.key == DECOY_KEY:
+            spot = _decoy_spot(game)
+            if spot is None or not game.use_item(idx, target=spot):
+                return False, "没有合适的落点甩垃圾桶盖"
+            return True, f"抄起垃圾桶盖甩向 ({spot[0]},{spot[1]})"
+        if not game.use_item(idx):
+            return False, f"{item.name} 现在用不了"
+        return True, f"使用 {item.name}"
+    if raw == ">":
+        if game.stairs is None or (game.px, game.py) != game.stairs:
+            return False, "你不在下行楼梯上"
+        if game.depth >= MAX_DEPTH:
+            return False, "已经是最后一层，清场即通关"
+        if not game.can_descend():
+            return False, "本层还没清场，不能下潜"
+        game.descend()
+        return True, f"走下楼梯 → 第 {game.depth} 层「{game.level_name}」"
+    return False, f"未知按键 {raw!r}（按 ? 查看操作说明）"
+
+
+def _player_interactive(game: Game, color_on: bool,
+                        get_key=input, echo=print) -> str:
+    """M21：键盘操作主循环。返回结束令牌：'win' / 'dead' / 'quit'。
+
+    get_key / echo 均可注入（测试时用假输入 + 静默回显），默认走真实终端 input/print。
+    循环只负责「渲染 → 读键 → 执行 → 怪物回合」，不引入随机 ⇒ #2 不变。
+    """
+    echo(CONTROLS_HELP)
+    while not game.player_dead:
+        alive = [m for m in game.monsters if m.alive]
+        if game.depth >= MAX_DEPTH and not alive:
+            return "win"
+        echo(_colored(game, color_on))
+        status = (f"玩家 HP: {game.player_hp}/{game.player_max_hp}"
+                  f" | 背包: {_bag_str(game)}"
+                  + _stealth_str(game) + _noise_str(game))
+        if game.stairs is not None and (game.px, game.py) == game.stairs:
+            status += " | 站在下行楼梯上，按 > 下潜"
+        echo(status)
+        key = get_key("动作> ")
+        acted, msg = _handle_key(game, key)
+        echo(f"-- {msg}")
+        if msg == "quit":
+            return "quit"
+        if acted:
+            game.monster_turn()
+    return "dead"
+
+
+def _ending_banner(ending: str, game: Game) -> str:
+    if ending == "win":
+        return (f"\n第 {game.depth} 层清场，蜘蛛侠摆荡着回家吃梅姨的三明治。"
+                "（你赢了！）")
+    if ending == "dead":
+        return "\n蜘蛛侠被击倒了……（游戏结束）"
+    return "\n演示结束（已退出）。"
+
+
 def _bag_str(game: Game) -> str:
     if not game.inventory:
         return "空"
@@ -394,6 +533,7 @@ def main() -> None:
     noise = "--noise" in args              # M8：听觉默认关闭
     flashlight = "--flashlight" in args    # M12：随身手电默认不装备
     light = "--light" in args or flashlight   # M11：光照衰减默认关闭；--flashlight 隐含 --light
+    play = "--play" in args                # M21：键盘操作模式（opt-in，默认仍是脚本自动驾驶 demo）
     # 听觉只在「怪物要被发现才追你」时才有意义 ⇒ --noise 隐含 --stealth
     stealth = "--stealth" in args or noise
     # M10：终端上色（纯展示层，不改字形/状态）。默认 TTY 自动开，可用 --no-color / --color 强制。
@@ -424,6 +564,11 @@ def main() -> None:
     if flashlight:
         print("手电模式：蛛网发射器探照灯已装备——开灯照亮四周、关灯摸黑潜行；"
               "演示里会「潜行摸黑、交手开灯」地自动开关。")
+    if play:
+        print("键盘操作模式：你来控制蜘蛛侠。操作说明见下方，随时按 ? 查看、Q 退出。")
+        ending = _player_interactive(game, color_on)
+        print(_ending_banner(ending, game))
+        return
     print(_colored(game, color_on))
     print(f"玩家 HP: {game.player_hp}/{game.player_max_hp} | 背包: {_bag_str(game)}")
 
