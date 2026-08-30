@@ -23,15 +23,20 @@ os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
 
 from rogue import Game                                          # noqa: E402
 from rogue.rng import RandomSource                              # noqa: E402
-from rogue.render_pygame import (                               # noqa: E402
-    tile_color, pixel_pos,
-    UNSEEN_RGB, FLOOR_RGB, FLOOR_DIM, WALL_RGB, WALL_DIM,
-)
 
+# render_pygame 在模块顶层 import pygame，故整组导入放进 try/except：
+# pygame 缺失时这些名字给占位 None，所有 GUI 用例 skipUnless(_HAVE_GUI) 干净跳过，
+# 绝不抛 ModuleNotFoundError 拖垮 gate（与文件头 docstring 声明一致）。
 try:
-    from rogue.render_pygame import PygameRenderer
+    from rogue.render_pygame import (                           # noqa: E402
+        tile_color, pixel_pos,
+        UNSEEN_RGB, FLOOR_RGB, FLOOR_DIM, WALL_RGB, WALL_DIM,
+        PygameRenderer,
+    )
     _HAVE_GUI = True
 except Exception:                                # pygame 未装 → 整组 skip
+    tile_color = pixel_pos = None
+    UNSEEN_RGB = FLOOR_RGB = FLOOR_DIM = WALL_RGB = WALL_DIM = None
     PygameRenderer = None
     _HAVE_GUI = False
 
@@ -329,6 +334,68 @@ class TestM24AnimationAndArt(unittest.TestCase):
         self.assertEqual(len([m for m in g_term.monsters if m.alive]),
                          len([m for m in g_gui.monsters if m.alive]))
         self.assertEqual(len(g_term.inventory), len(g_gui.inventory))
+
+
+@unittest.skipUnless(_HAVE_GUI, "pygame 未安装（headless 跳过）")
+class TestM27TileSprites(unittest.TestCase):
+    """M27：地形贴图改由 tiles/*.png 序列帧 Sprite 提供（缺文件回退程序化）。
+
+    - 资产存在且被加载；
+    - 加载的 PNG 与程序化绘制在 cell==BASE 时逐像素一致（防素材漂移，视觉与 M24 零差异）；
+    - tiles/ 缺失时自动回退程序化、属性齐全、draw 不报错。
+    """
+
+    def test_tile_assets_present(self):
+        import rogue.render_pygame as rp
+        names = []
+        for base in ("floor_lit", "floor_dim", "wall_lit", "wall_dim", "unseen"):
+            for f in range(4):
+                names.append(f"{base}_{f}.png")
+        for n in names:
+            self.assertTrue((rp.TILES_DIR / n).is_file(), f"缺少序列帧资产 {n}")
+
+    def test_png_sprites_loaded(self):
+        r = PygameRenderer(_new_game(), cell_size=28)
+        self.assertTrue(r._using_png_sprites)
+        self.assertGreater(len(r.floor_frames[True]), 1)
+        self.assertGreater(len(r.wall_frames[True]), 1)
+        self.assertGreater(len(r.unseen_frames), 1)
+        # 单帧属性也来自 PNG（draw 用的基准帧）
+        for name in ("tile_floor", "tile_floor_dim", "tile_wall",
+                     "tile_wall_dim", "tile_unseen"):
+            self.assertIsNotNone(getattr(r, name))
+
+    def test_png_matches_procedural_pixelwise(self):
+        """加载的 PNG 与同款程序化绘制在基准分辨率下逐像素一致 ⇒ 素材不漂移。"""
+        import rogue.render_pygame as rp
+        specs = [
+            ("floor_lit", lambda: rp._make_floor_surface(64, True, 0, True)),
+            ("floor_dim", lambda: rp._make_floor_surface(64, False, 0, True)),
+            ("wall_lit", lambda: rp._make_wall_surface(64, True, 0, True)),
+            ("wall_dim", lambda: rp._make_wall_surface(64, False, 0, True)),
+            ("unseen", lambda: rp._make_unseen_surface(64, True, 0, True)),
+        ]
+        for name, fn in specs:
+            png = rp.pygame.image.load(str(rp.TILES_DIR / f"{name}_0.png"))
+            proc = fn()
+            a = rp.pygame.image.tostring(png.convert(), "RGB")
+            b = rp.pygame.image.tostring(proc.convert(), "RGB")
+            self.assertEqual(a, b, f"{name} 的 PNG 与程序化绘制不一致（素材漂移）")
+
+    def test_fallback_when_tiles_missing(self):
+        """tiles/ 缺失 ⇒ 回退程序化、属性齐全、draw 不报错（与 M24 零差异）。"""
+        import rogue.render_pygame as rp
+        old = rp.TILES_DIR
+        rp.TILES_DIR = old / "_does_not_exist_"
+        try:
+            r = PygameRenderer(_new_game(), cell_size=28)
+            self.assertFalse(r._using_png_sprites)
+            for name in ("tile_floor", "tile_floor_dim", "tile_wall",
+                         "tile_wall_dim", "tile_unseen"):
+                self.assertIsNotNone(getattr(r, name))
+            r.draw()
+        finally:
+            rp.TILES_DIR = old
 
 
 if __name__ == "__main__":

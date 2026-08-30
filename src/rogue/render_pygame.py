@@ -26,6 +26,17 @@ M24 动画 + 美术 + 音效升级（T-024 / ADR-020 / 不变量 #24）：
 - 氛围层：暗角 vignette + 开灯房间光晕；
 - 音效升级：脚步 / 摆荡 whoosh / 感应刺痛 / 胜负 stings（全程序化合成、懒初始化、失败静默）。
 纯几何、零随机、确定性（不变量 #2 精神）。
+
+M27 序列帧 Sprite（T-027 / ADR-023 / 不变量 #27）：
+- M24 预渲染已「按帧组织」（floor_frames / wall_frames / unseen_frames，N=4 相位），
+  本里程碑把这层地形贴图换成磁盘上的 `tiles/*.png` 序列帧 Sprite——运行时 `blit`
+  取代每帧程序化重绘，接口/视觉与 M24 一致。
+- 烘焙与回退共用同一套模块级绘制函数（`_make_floor_surface` 等）：`scripts/gen_tiles.py`
+  离线确定性烘焙 14 张 PNG（floor/wall 各 lit/dim ×4 帧 + unseen ×4 帧，零随机）；
+  `_build_tiles` 优先加载 PNG，缺文件则回退到同款程序化绘制（视觉零差异）。
+- 不变式：只读 Game、零随机、确定性不变（#1/#2/#8 延伸）；PNG 是确定性产物、加载不引入随机；
+  地形源（PNG 还是程序化）只影响「怎么画」，不改变 `render()` 字形/优先级/玩法。
+- 红线不变：仍只调 Game 既有方法、不写任何游戏状态、不引入随机 ⇒ 门禁四道门与 M24 同构。
 """
 from __future__ import annotations
 
@@ -33,8 +44,13 @@ import array
 import io
 import math
 import os
+import pathlib
 import sys
 import wave
+
+# M27：序列帧 Sprite 目录（仓库根 tiles/）。渲染层优先从这里的 *.png 加载，
+# 缺文件时回退到同款程序化绘制（与 M24 视觉零差异、确定性不变）。
+TILES_DIR = pathlib.Path(__file__).resolve().parents[2] / "tiles"
 
 # pygame 在模块顶部 import：headless 测试用 SDL_VIDEODRIVER=dummy 加载；
 # main.py 只在 --gui 分支 import 本模块，故 gate 不传 --gui 时不强制 pygame。
@@ -157,6 +173,62 @@ def _blend(base: tuple[int, int, int], d: int) -> tuple[int, int, int]:
             max(0, min(255, base[2] + d)))
 
 
+# ---- 地形贴图绘制（模块级，M27 抽出来供「运行时程序化回退」与「gen_tiles 烘焙」共用）----
+# 同一套代码 ⇒ PNG 资产与程序化回退逐像素一致（不变量 #27：素材不漂移、确定性不变）。
+def _make_floor_surface(cell: int, visible: bool, phase: int = 0,
+                        detail: bool = True) -> "pygame.Surface":
+    s = pygame.Surface((cell, cell))
+    base = FLOOR_RGB if visible else FLOOR_DIM
+    s.fill(base)
+    if detail and visible:
+        line = _blend(base, 22)        # 蛛网纹理：淡冷色细线
+        off = (phase % 4) - 1          # -1..2 的轻微相位
+        for (x0, y0, x1, y1) in (
+            (cell // 2, 0, cell // 2, cell),
+            (0, cell // 2, cell, cell // 2),
+            (0 + off, 0, cell + off, cell),
+            (cell - off, 0, -off, cell),
+        ):
+            pygame.draw.line(s, line, (x0, y0), (x1, y1), 1)
+    return s
+
+
+def _make_wall_surface(cell: int, visible: bool, phase: int = 0,
+                      detail: bool = True) -> "pygame.Surface":
+    s = pygame.Surface((cell, cell))
+    base = WALL_RGB if visible else WALL_DIM
+    s.fill(base)
+    if detail:
+        breath = 10 * math.sin(phase * math.pi / 2)   # 砖缝呼吸
+        seam = _blend(base, -14 + int(breath))
+        edge = _blend(base, 16)
+        # 砖缝：横向 + 纵向
+        pygame.draw.line(s, seam, (0, cell // 2), (cell, cell // 2), 1)
+        pygame.draw.line(s, seam, (cell // 2, 0), (cell // 2, cell // 2), 1)
+        pygame.draw.line(s, seam, (cell // 4, cell // 2),
+                         (cell // 4, cell), 1)
+        pygame.draw.line(s, seam, (3 * cell // 4, cell // 2),
+                         (3 * cell // 4, cell), 1)
+        # 红蓝描边：呼应战衣（上沿红、下沿蓝）
+        pygame.draw.line(s, SPIDEY_RED, (0, 0), (cell, 0), 1)
+        pygame.draw.line(s, SPIDEY_BLUE, (0, cell - 1), (cell, cell - 1), 1)
+        if visible:
+            pygame.draw.line(s, edge, (0, 0), (0, cell), 1)
+    return s
+
+
+def _make_unseen_surface(cell: int, visible: bool = True, phase: int = 0,
+                        detail: bool = True) -> "pygame.Surface":
+    s = pygame.Surface((cell, cell))
+    s.fill(UNSEEN_RGB)
+    if detail:
+        line = _blend(UNSEEN_RGB, 4)
+        off = (phase % 4) - 1
+        pygame.draw.line(s, line, (0 + off, 0), (cell + off, cell), 1)
+        pygame.draw.line(s, line, (cell - off, 0), (-off, cell), 1)
+    return s
+
+
 class PygameRenderer:
     """读取 Game 公开状态、逐帧画窗口的视图层。
 
@@ -191,6 +263,8 @@ class PygameRenderer:
         self._prev_sense: set = set()
         self._glow = None
         self._vignette = None
+        self.tiles_dir = TILES_DIR        # M27：序列帧目录（可被测试覆盖以验证回退）
+        self._using_png_sprites = False   # M27：是否成功加载了 tiles/*.png
         w = game.width * cell_size
         h = game.height * cell_size + HUD_HEIGHT
         pygame.init()
@@ -204,9 +278,25 @@ class PygameRenderer:
         self._build_tiles()
         self._init_audio()
 
-    # ---- 预渲染地形贴图 ----
+    # ---- 预渲染地形贴图（M27：优先加载 tiles/*.png 序列帧，缺失回退程序化）----
     def _build_tiles(self) -> None:
         cell = self.cell
+        N = 4
+        sprites = self._load_tile_sprites(cell, N)
+        if sprites is not None:
+            # 已从 PNG 资产加载（确定性、零随机）：直接用于绘制 + 帧动画
+            self.tile_floor = sprites["floor"][True][0]
+            self.tile_floor_dim = sprites["floor"][False][0]
+            self.tile_wall = sprites["wall"][True][0]
+            self.tile_wall_dim = sprites["wall"][False][0]
+            self.tile_unseen = sprites["unseen"][0]
+            self.floor_frames = sprites["floor"]
+            self.wall_frames = sprites["wall"]
+            self.unseen_frames = sprites["unseen"]
+            self._using_png_sprites = True
+            return
+        # 回退：与 M24 完全一致的程序化贴图（tiles/ 缺失时也能跑，零回归）
+        self._using_png_sprites = False
         self.tile_floor = self._make_floor(True, 0)
         self.tile_floor_dim = self._make_floor(False, 0)
         self.tile_wall = self._make_wall(True, 0)
@@ -214,7 +304,6 @@ class PygameRenderer:
         self.tile_unseen = self._make_unseen(0)
         # 多帧（仅 detail 下生成；小 cell 退化为单帧，保证 headless 轻量）
         if self.detail:
-            N = 4
             self.floor_frames = {
                 True: [self._make_floor(True, p) for p in range(N)],
                 False: [self._make_floor(False, p) for p in range(N)],
@@ -229,57 +318,66 @@ class PygameRenderer:
             self.wall_frames = {True: [self.tile_wall], False: [self.tile_wall_dim]}
             self.unseen_frames = [self.tile_unseen]
 
+    def _load_tile_sprites(self, cell: int, n: int) -> dict | None:
+        """尝试从 tiles/*.png 加载序列帧 Sprite。
+
+        文件命名约定（scripts/gen_tiles.py 烘焙）：
+          floor_lit_<f>.png / floor_dim_<f>.png / wall_lit_<f>.png /
+          wall_dim_<f>.png / unseen_<f>.png   （f = 0..n-1）
+        任一缺失或损坏 ⇒ 返回 None（调用方回退程序化绘制）。
+        加载后按 cell 缩放（最近邻）到与网格对齐；cell==BASE 时即原图。
+        纯文件读取、零随机 ⇒ 不变量 #2/#27。
+        """
+        base = self.tiles_dir
+        if not base.is_dir():
+            return None
+
+        def load(name: str) -> list | None:
+            out: list = []
+            for f in range(n):
+                p = base / f"{name}_{f}.png"
+                if not p.is_file():
+                    return None
+                try:
+                    surf = pygame.image.load(str(p))
+                    surf = pygame.transform.scale(surf, (cell, cell))
+                except Exception:
+                    return None
+                out.append(surf)
+            return out
+
+        try:
+            floor_lit = load("floor_lit")
+            floor_dim = load("floor_dim")
+            wall_lit = load("wall_lit")
+            wall_dim = load("wall_dim")
+            unseen = load("unseen")
+        except Exception:
+            return None
+        if None in (floor_lit, floor_dim, wall_lit, wall_dim, unseen):
+            return None
+        if not self.detail:
+            # 小 cell：退化为单帧（与 M24 行为一致，headless 轻量）
+            return {
+                "floor": {True: [floor_lit[0]], False: [floor_dim[0]]},
+                "wall": {True: [wall_lit[0]], False: [wall_dim[0]]},
+                "unseen": [unseen[0]],
+            }
+        return {
+            "floor": {True: floor_lit, False: floor_dim},
+            "wall": {True: wall_lit, False: wall_dim},
+            "unseen": unseen,
+        }
+
     def _make_floor(self, visible: bool, phase: int = 0) -> pygame.Surface:
-        cell = self.cell
-        s = pygame.Surface((cell, cell))
-        base = FLOOR_RGB if visible else FLOOR_DIM
-        s.fill(base)
-        if self.detail and visible:
-            line = _blend(base, 22)        # 蛛网纹理：淡冷色细线
-            # 十字 + 双对角（相位微调对角偏移，制造「轻闪」呼吸感）
-            off = (phase % 4) - 1          # -1..2 的轻微相位
-            for (x0, y0, x1, y1) in (
-                (cell // 2, 0, cell // 2, cell),
-                (0, cell // 2, cell, cell // 2),
-                (0 + off, 0, cell + off, cell),
-                (cell - off, 0, -off, cell),
-            ):
-                pygame.draw.line(s, line, (x0, y0), (x1, y1), 1)
-        return s
+        # M27 回退：与 _make_floor_surface 同款；tiles/*.png 缺失时用它（视觉零差异）
+        return _make_floor_surface(self.cell, visible, phase, self.detail)
 
     def _make_wall(self, visible: bool, phase: int = 0) -> pygame.Surface:
-        cell = self.cell
-        s = pygame.Surface((cell, cell))
-        base = WALL_RGB if visible else WALL_DIM
-        s.fill(base)
-        if self.detail:
-            breath = 10 * math.sin(phase * math.pi / 2)   # 砖缝呼吸
-            seam = _blend(base, -14 + int(breath))
-            edge = _blend(base, 16)
-            # 砖缝：横向 + 纵向
-            pygame.draw.line(s, seam, (0, cell // 2), (cell, cell // 2), 1)
-            pygame.draw.line(s, seam, (cell // 2, 0), (cell // 2, cell // 2), 1)
-            pygame.draw.line(s, seam, (cell // 4, cell // 2),
-                             (cell // 4, cell), 1)
-            pygame.draw.line(s, seam, (3 * cell // 4, cell // 2),
-                             (3 * cell // 4, cell), 1)
-            # 红蓝描边：呼应战衣（上沿红、下沿蓝）
-            pygame.draw.line(s, SPIDEY_RED, (0, 0), (cell, 0), 1)
-            pygame.draw.line(s, SPIDEY_BLUE, (0, cell - 1), (cell, cell - 1), 1)
-            if visible:
-                pygame.draw.line(s, edge, (0, 0), (0, cell), 1)
-        return s
+        return _make_wall_surface(self.cell, visible, phase, self.detail)
 
     def _make_unseen(self, phase: int = 0) -> pygame.Surface:
-        cell = self.cell
-        s = pygame.Surface((cell, cell))
-        s.fill(UNSEEN_RGB)
-        if self.detail:
-            line = _blend(UNSEEN_RGB, 4)
-            off = (phase % 4) - 1
-            pygame.draw.line(s, line, (0 + off, 0), (cell + off, cell), 1)
-            pygame.draw.line(s, line, (cell - off, 0), (-off, cell), 1)
-        return s
+        return _make_unseen_surface(self.cell, True, phase, self.detail)
 
     # ---- 音效（懒初始化 + 静默降级）----
     def _init_audio(self) -> None:
