@@ -1,5 +1,6 @@
 """终端 Roguelike 演示入口（M1 移动 + M2 战斗 + M3 怪物 AI + M4 道具背包 + M5 程序化关卡
-+ M6 视野 + M7 怪物感知与潜行 + M8 噪音与听觉 + M9 主动制造响动 + M10 ANSI 颜色高亮）。
++ M6 视野 + M7 怪物感知与潜行 + M8 噪音与听觉 + M9 主动制造响动 + M10 ANSI 颜色高亮
++ M11 光照衰减 + M12 随身手电 + M13 光照影响玩家视野 + M14 可开关房间灯）。
 
 主题：MCU 荷兰弟（Tom Holland）版蜘蛛侠。
 运行：python main.py（--no-fog 切回全图；--stealth 开启怪物视野与潜行；--noise 再开启听觉，
@@ -42,6 +43,11 @@ M12：`--flashlight` 装备随身手电（蛛网发射器探照灯，隐含 --li
 动态光源：开灯照亮四周（半径比随身微光更远，同时让你在暗处的怪眼里更易被察觉），
 关灯则退回微光、摸黑潜行更稳。手电默认不装备 ⇒ 不加 `--flashlight` 时演示与 M11 逐字节一致。
 演示里蜘蛛侠的开关策略：潜行且还没人发现你 → 关灯摸黑；一旦有人盯上 → 开灯照亮战场。
+
+M14：`--light --stealth` 下蜘蛛侠会主动**射灭未察觉敌人所在房间的灯**——蛛网射中天花板灯的拉链，
+关灯后房间变暗（M11 暗处缩短怪物感知 + M13 缩短玩家视野——双刃），让摸哨更容易。
+拉链的轻响（3）从灯处传出 ⇒ 可作调虎离山的轻量手段（只惊动近处的人）。
+只在 `--light` 模式下有意义（light=False ⇒ 没有灯可关）；不加 `--light` 时演示与 M13 逐字节一致。
 """
 from __future__ import annotations
 import os
@@ -204,6 +210,32 @@ LOOT_RANGE = 6           # 清场后只「顺路」捡这个距离内的补给�
 DECOY_MIN_THREAT = 2     # 至少被几只敌人盯上，才值得花一回合甩垃圾桶盖（换取各个击破）
 
 
+def _light_to_switch_off(game: Game):
+    """M14：找一个值得关灯的房间——未察觉敌人所在、灯还亮着、玩家够得着。
+
+    战术：射灭敌人所在房间的灯 ⇒ 房间变暗 ⇒ 暗处缩短怪物感知半径（M11）⇒ 更容易摸哨。
+    遍历未察觉敌人，找它们所在房间中灯还亮着且玩家够得着（LOS + 射程）的最近者。
+    确定性：遍历顺序固定、用严格小于取最近（不引入任何随机）。
+    没有可关的灯时返回 None（不浪费回合）。
+    """
+    best = None
+    best_dist = None
+    for m in game.unaware_monsters():
+        for room in game.rooms:
+            if not room.contains(m.x, m.y):
+                continue
+            cx, cy = room.center
+            if not game.light_is_on(cx, cy):
+                continue       # 灯已经关了
+            if not game.can_toggle_light(cx, cy):
+                continue       # 够不着（看不见 / 射程外）
+            dist = abs(cx - game.px) + abs(cy - game.py)
+            if best_dist is None or dist < best_dist:
+                best_dist = dist
+                best = (cx, cy)
+    return best
+
+
 def _decoy_spot(game: Game):
     """挑一个甩垃圾桶盖的落点：**听得见的人最多**、其次**离你最远**。
 
@@ -227,7 +259,7 @@ def _decoy_spot(game: Game):
 
 
 def _player_act(game: Game) -> str:
-    """蜘蛛侠一回合的决策：强化 → 补血 → 拾取 → 被围则后撤 → 蛛网拳 → 蛛网弹/逼近 → 搜刮 → 下楼。"""
+    """蜘蛛侠一回合的决策：关灯 → 强化 → 补血 → 拾取 → 被围则后撤 → 蛛网拳 → 蛛网弹/逼近 → 搜刮 → 下楼。"""
     # 0) M12 随身手电：潜行摸黑、交手点亮（纯状态切换，不消耗随机；只有 flashlight 装备了才管）
     if game.flashlight_enabled:
         # 还没人发现你（潜行且 hidden）时关灯更稳；一旦被盯上就开灯照亮战场
@@ -236,6 +268,15 @@ def _player_act(game: Game) -> str:
             game.toggle_flashlight()
             return ("打开蛛网探照灯，照亮战场" if want_on
                     else "关掉蛛网探照灯，摸黑潜行")
+
+    # 0b) M14 可开关房间灯：潜行 + 光照模式下，射灭未察觉敌人所在房间的灯
+    #     （关灯变暗 ⇒ 暗处缩短怪物感知 ⇒ 更容易摸哨；双刃：你也看不远，但手电/蜘蛛感应可导航）
+    if game.light_enabled and game.stealth_enabled:
+        spot = _light_to_switch_off(game)
+        if spot is not None:
+            cx, cy = spot
+            game.toggle_light(cx, cy)
+            return f"蛛网射中灯拉链，熄灭 ({cx},{cy}) 处的灯——摸黑接近"
 
     # 1) 纳米强化剂：永久提升蛛网拳伤害，越早用越值
     idx = _find_in_bag(game, "nano_boost")
@@ -368,7 +409,8 @@ def main() -> None:
     if light:
         print("光照模式：房间有灯、走廊昏暗——暗处的敌人视野缩短（全黑 2 格 / 昏暗 4 格 / 明亮 7 格）；"
               "光照也压短你自己的视野（暗处看不远，走廊里只能看清脚下几步、房间里视野恢复）；"
-              "配合 --stealth 才能摸到暗处的哨兵，配合 --flashlight 开灯能看清暗处。")
+              "配合 --stealth 才能摸到暗处的哨兵，配合 --flashlight 开灯能看清暗处。"
+              "M14：--light --stealth 下蛛网可射灭房间灯（缩短敌人感知、双刃也缩短你的视野）。")
     if flashlight:
         print("手电模式：蛛网发射器探照灯已装备——开灯照亮四周、关灯摸黑潜行；"
               "演示里会「潜行摸黑、交手开灯」地自动开关。")

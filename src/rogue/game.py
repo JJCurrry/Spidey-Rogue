@@ -1,6 +1,6 @@
-"""M1~M13：格子地图 + 玩家移动 + 战斗系统 + 怪物 AI + 道具背包 + 程序化关卡 + 视野渲染
+"""M1~M14：格子地图 + 玩家移动 + 战斗系统 + 怪物 AI + 道具背包 + 程序化关卡 + 视野渲染
 + 怪物感知潜行 + 噪音听觉 + 主动制造响动 + ANSI 颜色 + 光照衰减 + 随身手电 + 光照影响玩家视野
-（蜘蛛侠 MCU 荷兰弟版主题）。
++ 可开关房间灯（蜘蛛侠 MCU 荷兰弟版主题）。
 
 注意（不变量 #1）：随机经 RandomSource 注入；本模块不直接引入随机模块。
 注意（GB-1 边界地雷）：不可走出边界、不可走入墙、不可走入怪物。
@@ -29,6 +29,10 @@
                   按目标格光照算（亮处的东西容易被看见、暗处的东西难被看见），有效半径恒 ≤ SIGHT_RADIUS(8)，
                   同档位下 player_r ≥ monster_r（2≥2 / 4≥4 / 8≥7）⇒ #9 硬性质「怪看得见你 ⇒ 你看得见它」不破；
                   纯几何零随机、默认关闭（light=False 或 fov=False ⇒ 走 M6 原逻辑，与 M1~M12 逐字节一致）。
+注意（不变量 #15）：M14 可开关房间灯——蛛网射中房间中心灯的拉链，翻转该房间的灯（关灯变暗 / 开灯恢复）；
+                  纯几何、零随机、不消耗 RandomSource；默认关闭（light=False ⇒ toggle_light 恒返回 False）；
+                  关灯只移除光源（不新增）⇒ 光照场只变暗或恢复，有效半径恒 ≤ SIGHT_RADIUS(8) ⇒ #9/#12/#14 不破；
+                  声源在灯处（不在玩家处）⇒ M8 调虎离山成立；toggle_light 只翻集合 + 重算场，不改写任何玩法状态（换层重置）。
 """
 from __future__ import annotations
 from typing import NamedTuple
@@ -82,6 +86,11 @@ CAUSE_SOUND = "sound"          # 被惊动的原因：听见动静了（渲染�
 NOISE_DECOY = 9                # 垃圾桶盖落地的响动（全场最响：它的全部意义就是响）
 DECOY_RANGE = 6                # 甩出距离上限（切比雪夫）⇒ 隔着房间甩不过去，得走到看得见的地方
 DECOY_KEY = "decoy"            # 诱饵道具的 key（**不在** ITEM_KEYS 掉落池里，理由见下）
+
+# M14 可开关房间灯（三条常量都是确定性常数，不掷骰 ⇒ 不扰动随机序列，#2/#15）
+# 主题：蛛网射中天花板灯的拉链——拉一下关（变暗）、再拉一下开（恢复），把静态光源变成玩家工具。
+WEB_LIGHT_RANGE = 6            # 蛛网射灯开关的射程（切比雪夫，含脚下；与 DECOY_RANGE 同值、比视野 8 短）
+NOISE_TOGGLE_LIGHT = 3         # 灯开关拉链的轻响（声源在**灯处**，比蛛网拳 6 轻、比倒挂突袭 2 略响）
 
 # M4 道具与背包（蜘蛛侠主题：梅姨的爱心便当、备用蛛网芯、斯塔克的纳米科技）
 INVENTORY_CAPACITY = 5         # 不变量 #5：背包容量上限
@@ -244,6 +253,10 @@ class Game:
         # flashlight_on 是当前是否点亮（默认与装备状态一致：装备即点亮，玩家可随时 toggle）。
         self.flashlight_enabled = flashlight
         self.flashlight_on = flashlight
+        # M14 可开关房间灯状态：switched_lights 是「已被玩家关灯的房间中心坐标」集合（默认空 = 所有灯亮）。
+        # toggle_light 射中灯的拉链翻转该集合；_light_sources 跳过里面的房间 ⇒ 关灯变暗。
+        # 换层（load_level）清空：新楼层 = 新房间 = 新灯。纯状态、不消耗 RandomSource（#15）。
+        self.switched_lights: set[tuple[int, int]] = set()
         # M2 玩家状态（跨层保留：HP / 背包 / 纳米加成）
         self.player_max_hp = PLAYER_MAX_HP
         self.player_hp = PLAYER_MAX_HP
@@ -864,6 +877,7 @@ class Game:
         M6：新楼层 = 新地图 ⇒ 清空上一层的「已探索记忆」（记忆跟着地图走，不跨层）。
         """
         self.explored = set()  # 换层即失忆：上一层的地形记忆对新楼层无意义
+        self.switched_lights = set()  # M14：新楼层 = 新房间 = 新灯（关灯状态不跨层）
         self.grid = [list(row) for row in level.grid]
         self.height = level.height
         self.width = level.width
@@ -983,9 +997,12 @@ class Game:
 
         M12：flashlight_on 仅在「光照已开启且手电已装备并点亮」时才追加玩家处的
         动态光源（FLASHLIGHT_RADIUS）；手电默认不装备 ⇒ 列表与 M11 完全一致（#13）。
+        M14：switched_lights 里的房间中心跳过——蛛网拉链把灯关了，该房间不再有光源
+        （关灯只移除光源、不新增 ⇒ 房间变暗、走廊失去溢光；光照场只变暗或恢复，#12/#15）。
         """
         sources = [(r.center[0], r.center[1], ROOM_LIGHT_RADIUS)
-                   for r in self.rooms]
+                   for r in self.rooms
+                   if r.center not in self.switched_lights]
         if self.light_enabled:
             sources.append((self.px, self.py, PLAYER_GLOW_RADIUS))
             if self.flashlight_on:
@@ -1020,6 +1037,64 @@ class Game:
         self.flashlight_on = not self.flashlight_on
         self.update_light()
         return self.flashlight_on
+
+    # ---------- M14 可开关房间灯（蛛网射灯拉链）----------
+    # 不变量 #15：关灯是纯几何（fov.has_line_of_sight + 射程 + 房间中心判定），
+    #             不消耗 RandomSource ⇒ 不扰动战斗/掉落/生成的随机序列；
+    #             关灯只移除光源（_light_sources 跳过 switched_lights）⇒ 光照场只变暗或恢复，
+    #             有效半径恒 ≤ SIGHT_RADIUS(8) ⇒ #9/#12/#14 对称硬性质不破；
+    #             拉链轻响仍只经 emit_noise → Monster.alert(cause=CAUSE_SOUND) 唯一入口生效（#10 延伸）。
+    # 设计要点（ADR-010）：灯装在天花板中央（room.center），蛛网射中拉链翻转该房间的灯——
+    #             关灯变暗（M11 缩短怪物感知 + M13 缩短玩家视野——双刃）、开灯恢复；
+    #             声源在**灯处**（不在玩家处）⇒ 调虎离山成立（与 M8「被缠住的怪挣扎出声」同一原则）。
+    def can_toggle_light(self, x: int, y: int) -> bool:
+        """蛛网能否够到 (x,y) 处的灯开关（纯几何、零随机，不变量 #15）。
+
+        四条硬约束，任一不满足即够不着：
+          1) 光照已开启——光照关掉时没有灯可关（light=False ⇒ _light_sources 不含房间灯，
+             关不关都一样，toggle 是 no-op）；
+          2) (x,y) 是某房间的中心——灯装在天花板中央（M11 光源位置 = room.center），
+             射歪的蛛网打不到拉链；
+          3) 切比雪夫距离 ≤ WEB_LIGHT_RANGE——蛛网走直线、射程有限（含脚下：站在灯正下方
+             伸手就能够到，与 can_throw「甩出去必须离开自己」不同——射灯不是甩东西）；
+          4) 玩家**看得见灯**（复用 M6 的 has_line_of_sight）——蛛网走直线、遇墙即断。
+        """
+        if not self.light_enabled:
+            return False
+        if not any(r.center == (x, y) for r in self.rooms):
+            return False
+        if max(abs(x - self.px), abs(y - self.py)) > WEB_LIGHT_RANGE:
+            return False
+        return has_line_of_sight(self.grid, (self.px, self.py), (x, y))
+
+    def toggle_light(self, x: int, y: int) -> bool:
+        """蛛网射中 (x,y) 处的灯开关，翻转该房间的灯（纯几何、零随机，不变量 #15）。
+
+        关灯 ⇒ 房间灯从 _light_sources 移除 ⇒ 房间变暗（M11 暗处缩短怪物感知 +
+        M13 暗处缩短玩家视野——双刃：暗处的怪看不远、你也看不远）；
+        开灯 ⇒ 房间灯加回 _light_sources ⇒ 恢复明亮（双方视野恢复）。
+        M8 联动：拉链的轻响（NOISE_TOGGLE_LIGHT）从**灯处**传出（不是玩家处）⇒
+        可作调虎离山的轻量手段（比垃圾盖 NOISE_DECOY=9 轻得多、只惊动近处的人，但同时把房间弄暗）。
+        返回是否翻转成功（光照关 / 非房间中心 / 看不见 / 射程外 ⇒ False，不改状态，不消耗道具）。
+        换层（descend → load_level）清空 switched_lights（新楼层 = 新房间 = 新灯）。
+        """
+        if not self.can_toggle_light(x, y):
+            return False
+        light_pos = (x, y)
+        if light_pos in self.switched_lights:
+            self.switched_lights.remove(light_pos)   # 重新开灯（恢复明亮）
+        else:
+            self.switched_lights.add(light_pos)       # 关灯（房间变暗）
+        # 重算光照场 + 可见集合（update_fov 内部先 update_light 再算 visible，幂等、纯几何零随机）
+        self.update_fov()
+        # M8：拉链轻响从灯处传出——声源不在玩家脚下 ⇒ 调虎离山成立
+        # （听觉关闭时 emit_noise 是空操作、返回空表，M1~M7 行为一字节不变，#10）
+        self.emit_noise(x, y, NOISE_TOGGLE_LIGHT)
+        return True
+
+    def light_is_on(self, x: int, y: int) -> bool:
+        """(x,y) 处的房间灯是否亮着（纯查询，不改状态）。非房间中心恒返回 True（无灯可关）。"""
+        return (x, y) not in self.switched_lights
 
     def is_visible(self, x: int, y: int) -> bool:
         return (x, y) in self.visible
