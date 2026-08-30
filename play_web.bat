@@ -1,8 +1,12 @@
 @echo off
-rem Spider-Man roguelike - 网页版启动器（M28 网页化 + M29 localStorage 存档）
-rem 双击此文件即用浏览器玩网页版（pygbag 本地预览服务器，自动开提示地址）。
-rem 首次使用先装网页构建依赖：pip install -r requirements-web.txt
-rem 若要产出可托管的静态包，改用 build_wasm.bat（pygbag --build web.py）。
+rem Spider-Man roguelike - web launcher (M28 web build + M29 localStorage save)
+rem Double-click to play in browser via pygbag local preview server.
+rem First install web deps: pip install -r requirements-web.txt
+rem For a deployable static build use build_wasm.bat (pygbag --build web.py).
+rem PYTHONUTF8=1 forces UTF-8 so pygbag can read the UTF-8 source on a
+rem non-UTF-8 system (e.g. Chinese Windows GBK) without a UnicodeDecodeError.
+set PYTHONUTF8=1
+chcp 65001 >nul 2>&1
 cd /d "%~dp0"
 "C:\Users\Administrator\.workbuddy\binaries\python\versions\3.13.12\python.exe" -m pygbag web.py
 pause
