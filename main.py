@@ -78,6 +78,7 @@ from rogue.game import DECOY_KEY, NOISE_DECOY
 from rogue.rng import RandomSource
 from rogue.color import colorize, should_color  # M10：纯展示层上色
 from rogue.web_storage import get_default_backend  # M29：网页版 localStorage 后端（按环境自动选）
+from rogue import aim_state  # M30：交互式瞄准模式控制层视图状态（不属于 Game）
 
 SEED = 19                # 演示种子（挑过：三层都有怪，且能在回合上限内清场）
 MAX_DEPTH = 3            # 演示下潜到第几层收工
@@ -118,8 +119,18 @@ CONTROLS_HELP = (
     "随身手电开关（M12，需 --flashlight）：F\n"
     "下潜（站在 > 楼梯上）：>\n"
     "存档（保存当前进度）：S    读档（恢复上次存档）：L\n"
+    "=== 瞄准模式（M30，需 --light + 开关已摆）===\n"
+    "进入 / 退出瞄准：T（进入后光标初始在玩家处，瞄准不消耗回合）\n"
+    "  瞄准下移动光标：方向键 / WASD / HJKL（不消耗回合）\n"
+    "  射灭 / 射亮房间灯（可逆）：Enter 或 空格（消耗回合）\n"
+    "  射碎灯泡（一次性不可逆）：X（消耗回合）\n"
+    "  退出瞄准：T / Esc / Q（瞄准下 Q 退瞄准而非退游戏）\n"
     "查看本说明：?    退出：Q\n"
 )
+
+# M30：瞄准模式下方向键移动光标复用 MOVE_KEYS 的方向映射（不消耗回合）。
+# 退出瞄准的键集合（瞄准模式下拦截，避免误触退出游戏）。
+AIM_EXIT_KEYS = {"t", "q", "\x1b"}  # t / q / Esc（Esc 在终端常为 \x1b 单字符或转义序列头）
 
 
 def _bfs(game: Game, targets, avoid_monsters: bool = True):
@@ -429,6 +440,7 @@ def _handle_key(game: Game, key: str) -> tuple[bool, str]:
     # M26 存档 / 读档（大写 S/L，避免与移动键 s=下 / l=右 冲突）：
     # 纯传输 I/O + 状态恢复，不引入随机、不改写渲染以外的状态（#1/#2/#8）。
     # M29：传输层走 SAVE_BACKEND——浏览器用 localStorage、桌面回退文件，调用方无感。
+    # M30：S/L 在瞄准模式下仍可用（存档不消耗回合、不改瞄准状态）。
     if raw in ("S", "L"):
         try:
             if SAVE_BACKEND is None:
@@ -442,6 +454,48 @@ def _handle_key(game: Game, key: str) -> tuple[bool, str]:
             return False, "没有找到存档文件（先用 S 存档）"
         except Exception as exc:  # 存档损坏 / localStorage 不可用等
             return False, f"读档失败：{exc}"
+    # M30 交互式瞄准模式：进入后方向键移动光标、Enter/空格射灭、X 射碎、T/Q/Esc 退出。
+    # 瞄准状态是控制层视图状态（aim_state），不属于 Game；瞄准不消耗回合、不写 Game 状态；
+    # 确认射灭/射碎才消耗回合（走 game.toggle_switch/destroy_switch，复用 M19 几何约束）。
+    # 瞄准模式分支必须在所有动作键之前，拦截方向键/空格/Q 等的既有语义（模态）。
+    if aim_state.is_active():
+        # 退出瞄准（不消耗回合）：T / Q / Esc（瞄准下 Q 退瞄准而非退游戏，模态语义）
+        if low == "t" or low == "q" or raw == "\x1b":
+            aim_state.exit()
+            return False, "退出瞄准模式"
+        # 帮助（不消耗回合）
+        if low == "?":
+            return False, CONTROLS_HELP
+        # 方向键 / WASD / HJKL 移动光标（不消耗回合、不写 Game）
+        mv = MOVE_KEYS.get(raw, MOVE_KEYS.get(low))
+        if mv is not None:
+            dx, dy = mv
+            moved = aim_state.move(dx, dy, game)
+            if moved:
+                cx, cy = aim_state.cursor()
+                return False, f"瞄准光标 → ({cx},{cy})"
+            return False, "光标越界，原地不动"
+        # 射灭 / 射亮房间灯（消耗回合）：Enter / 空格（可逆：亮→暗 / 暗→亮）
+        if low in (" ", ""):
+            cx, cy = aim_state.cursor()
+            if not game.can_toggle_switch(cx, cy):
+                return False, "够不着那个开关（看不见 / 射程外 / 已碎 / 非开关格）"
+            if game.toggle_switch(cx, cy):
+                on = game.switch_light_is_on(cx, cy)
+                aim_state.exit()  # 出手后退出瞄准，回到正常模式
+                return True, ("射亮房间灯" if on else "射灭房间灯（房间变暗）")
+            return False, "射灭失败"
+        # 射碎灯泡（消耗回合，一次性不可逆）：X
+        if low == "x":
+            cx, cy = aim_state.cursor()
+            if not game.can_destroy_switch(cx, cy):
+                return False, "够不着那个开关（看不见 / 射程外 / 已碎 / 非开关格）"
+            if game.destroy_switch(cx, cy):
+                aim_state.exit()
+                return True, "射碎灯泡，房间永久黑暗"
+            return False, "射碎失败"
+        # 其它键在瞄准模式下被忽略（不消耗回合）
+        return False, "瞄准模式：方向键移动光标 / Enter 射灭 / X 射碎 / T 退出"
     mv = MOVE_KEYS.get(raw, MOVE_KEYS.get(low))
     if mv is not None:
         dx, dy = mv
@@ -502,7 +556,15 @@ def _handle_key(game: Game, key: str) -> tuple[bool, str]:
         if not game.can_descend():
             return False, "本层还没清场，不能下潜"
         game.descend()
+        aim_state.reset()  # M30：换层后开关重摆、光标位置无意义，复位避免跨局串扰
         return True, f"走下楼梯 → 第 {game.depth} 层「{game.level_name}」"
+    # M30 进入瞄准模式（不消耗回合）：T。需 --light + 开关已摆（switches_enabled）。
+    # 进入时光标初始位置 = 玩家位置；瞄准不消耗回合、不写 Game 状态。
+    if low == "t":
+        if not game.light_enabled or not game.switches_enabled:
+            return False, "未启用开关模式（用 --light 启动光照与开关）"
+        aim_state.enter(game.px, game.py)
+        return False, "进入瞄准模式（方向键移动光标 / Enter 射灭 / X 射碎 / T 退出）"
     return False, f"未知按键 {raw!r}（按 ? 查看操作说明）"
 
 
@@ -524,6 +586,11 @@ def _player_interactive(game: Game, color_on: bool,
                   + _stealth_str(game) + _noise_str(game))
         if game.stairs is not None and (game.px, game.py) == game.stairs:
             status += " | 站在下行楼梯上，按 > 下潜"
+        # M30：瞄准模式下在状态行提示光标位置（终端 --play 路径；GUI 走 draw 准星）
+        if aim_state.is_active():
+            cx, cy = aim_state.cursor()
+            status += (f" | 瞄准光标 → ({cx},{cy})"
+                       "（方向键移动 / Enter 射灭 / X 射碎 / T 退出）")
         echo(status)
         key = get_key("动作> ")
         acted, msg = _handle_key(game, key)
@@ -532,6 +599,7 @@ def _player_interactive(game: Game, color_on: bool,
             return "quit"
         if acted:
             game.monster_turn()
+    aim_state.reset()  # M30：游戏结束复位瞄准状态，避免跨局串扰
     return "dead"
 
 

@@ -44,20 +44,14 @@
 - M27 序列帧 Sprite（已完成，见 `docs/工单/T-027-序列帧Sprite.md` / `docs/adr/ADR-023-序列帧Sprite.md`）：把 M24 程序化地形贴图换成 `tiles/*.png` 序列帧——`render_pygame.py` 地形绘制抽成模块级 `_make_floor_surface`/`_make_wall_surface`/`_make_unseen_surface`，`_load_tile_sprites` 从 `tiles/*.png` 加载并按 cell 缩放、`_build_tiles` 优先用 PNG、缺文件回退同款程序化（视觉与 M24 逐像素一致）；`scripts/gen_tiles.py` 确定性烘焙 20 张 PNG（floor/wall 各 lit/dim ×4 帧 + unseen ×4 帧，BASE=64，零随机）；`tests/test_gui.py` 增 4 例（资产存在/PNG 加载/逐像素一致防漂移/缺文件回退）；评审 `allowed_dirs` 加 `tiles`；不变量 #27（确定性产物、加载零随机、缺文件回退、视觉零差异）；gate 574→578 全绿（实现 commit `291ebd2`）
 - M28 网页化（Pygbag）（已完成，见 `docs/工单/T-028-网页化Pygbag.md` / `docs/adr/ADR-024-网页化Pygbag.md`）：把 M22 起的 Pygame 窗口原样打包成 wasm——新增 `web.py` 浏览器入口 + `PygameRenderer.async_run` 异步主循环（每帧 `await asyncio.sleep(0)` 让出浏览器事件循环）+ `build_wasm.bat`/`build_wasm.sh` 构建脚本 + `requirements-web.txt`；游戏核心（`Game`/`render()`/`_handle_key`）一字未改、零新增随机（#1/#2/#8 延伸）；`run`/`async_run` 共用 `_pump_events` ⇒ 同 seed+同输入序列同结果（#28）；gate 578→580 全绿（不变量 #28）
 - M29 网页版 localStorage 存档（已完成，见 `docs/工单/T-029-网页版localStorage存档.md` / `docs/adr/ADR-025-网页版localStorage存档.md`）：把网页版存档的**传输层**从 pygbag `/data`（IndexedDB）切换到浏览器原生 `platform.window.localStorage`（固定键 `spiderman_roguelike_save_v1`）——新增 `src/rogue/web_storage.py` 可插拔后端（`LocalStorageBackend` 浏览器 / `FileSaveBackend` 桌面回退 / `get_default_backend` 按环境自动选）；`main.SAVE_BACKEND` 接线（`_handle_key` 的 S/L 改走 `SAVE_BACKEND.save/load_into`、不再写死 `SAVE_PATH`）、`web.py` 显式注入、新增 `play_web.bat`/`play_web.sh` 双击启动网页入口；序列化仍走 M26 `Game.to_dict`/`apply_state` 确定性排序导出 ⇒ localStorage 往返与文件往返 dict 层面逐字节等价（#26）、桌面与 M26 逐字节一致；纯 I/O、零随机、不写 `Game`（#1/#2/#8 延伸）；`tests/test_web_storage.py` 11 例全绿、gate 580→591 全绿（不变量 #29）
-- 下一步候选（M28/M29 网页化 + localStorage 已落地）：① 交互式射灯/碎灯/墙边开关的目标选择 UI（M14/M16/M19 的玩家可控版）；② 更多蜘蛛侠招式（AoE 蛛网束缚 / 可指定落点摆荡位移）；③ ~~主题美术换 `tiles/*.png` 序列帧 Sprite（已完成，见 M27）~~；④ ~~网页化（Pygbag 把 Pygame 打包成 wasm，零改核心，已完成，见 M28）~~；⑤ ~~网页版存档接入 `platform.window.localStorage` 替代 `/data` 直写（更稳妥的跨刷新持久化，已完成，见 M29）~~；⑥ 移动端触屏 / 虚拟按键支持（Pygbag 触屏事件）。
+- M30 交互式射灯 / 碎灯 UI（已完成，见 `docs/工单/T-030-交互式射灯碎灯UI.md` / `docs/adr/ADR-026-交互式射灯碎灯UI.md`）：把 M19「射灭 / 射碎墙边开关」的决策权从 demo 自动战术交还玩家——新增 `src/rogue/aim_state.py` 控制层视图状态（模块级 `_AIM` 字典，不属于 `Game`，与 `PygameRenderer.effects` 同性质）+ `main._handle_key` 瞄准模式分支（`T` 进入 / 方向键移光标 / `Enter` 射灭 / `X` 射碎 / `T`·`Q`·`Esc` 退出）+ `render_pygame._draw_aim_cursor` 准星（黄色方框 + 几何约束颜色十字）；**瞄准不消耗回合**（进入 / 退出 / 移动光标都不调 `monster_turn`，只有确认射灭 / 射碎成功才消耗回合——潜行核心：玩家可反复瞄准不惊动敌人）；几何约束复用 M19 的 `can_toggle_switch`/`can_destroy_switch`（够不着 ⇒ `acted=False`、不耗回合、不改 `Game`）；纯几何零随机、不写 `Game`（#1/#2/#8 延伸）、opt-in 默认零回归（不按 `T` 与 M29 逐字节一致）；`tests/test_aim_mode.py` 27 例全绿、gate 591→618 全绿（不变量 #30）
+- 下一步候选（M30 交互式射灯已落地）：① ~~交互式射灯/碎灯/墙边开关的目标选择 UI（已完成，见 M30）~~；② 更多蜘蛛侠招式（AoE 蛛网束缚 / 可指定落点摆荡位移，可复用 M30 的 `aim_state` 瞄准 UI）；③ 移动端触屏 / 虚拟按键支持（Pygbag 触屏事件，让手机浏览器也能玩）；④ 把 README/CLAUDE.md 七件套索引对齐到 M30 现状（README 里程碑表目前只到 M8，可补 M9~M30 摘要）。
 
 ## 七件套索引（只放指针）
 - ① 本文档（根索引）
-- ② 工单：`docs/工单/T-001-格子与移动.md` … `docs/工单/T-024-美术动画升级.md`
+- ② 工单：`docs/工单/T-001-格子与移动.md` … `docs/工单/T-030-交互式射灯碎灯UI.md`
 - ③ 接力：`docs/接力/HANDOFF-T001.md`（含 commit + 下一步；**全程只有这一根棒**，勿按里程碑新建）
-- ④ ADR：`docs/adr/ADR-001-技术选型.md`、`docs/adr/ADR-002-视野与渲染层.md`、
-  `docs/adr/ADR-003-怪物感知与潜行.md`、`docs/adr/ADR-004-噪音与听觉.md`、
-  `docs/adr/ADR-005-主动制造响动.md`、`docs/adr/ADR-006-ANSI颜色高亮.md`、
-  `docs/adr/ADR-007-光照衰减.md`、`docs/adr/ADR-008-随身手电.md`、
-  `docs/adr/ADR-009-光照影响玩家视野.md`、`docs/adr/ADR-010-可开关的房间灯.md`、
-  `docs/adr/ADR-011-怪物追击修正与配平.md`、`docs/adr/ADR-012-可破坏的房间灯.md`、
-  `docs/adr/ADR-013-环境光照场分离.md`、`docs/adr/ADR-014-怪物感知改用环境场.md`、
-  `docs/adr/ADR-015-灯开关独立实体.md`、`docs/adr/ADR-016-光照影响蜘蛛感应半径.md`
+- ④ ADR：`docs/adr/ADR-001-技术选型.md` … `docs/adr/ADR-026-交互式射灯碎灯UI.md`（共 26 份：技术选型 / 视野 / 潜行 / 噪音 / 响动 / 颜色 / 光照 / 手电 / 光照影响视野 / 可开关灯 / 追击修正 / 可破坏灯 / 环境场 / 怪物感知环境场 / 灯开关实体 / 蜘蛛感应光照 / 可键盘操作 / GUI / 主题化GUI / 美术动画 / Boss战 / 存档 / 序列帧Sprite / 网页化 / localStorage存档 / 交互式射灯碎灯UI）
 - ⑤ 不变量（红线）：`docs/不变量.md`
 - ⑥ 术语表：`docs/术语表.md`
 - ⑦ 地图：`docs/地图.md`

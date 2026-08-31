@@ -70,6 +70,10 @@ TILES_DIR = pathlib.Path(__file__).resolve().parents[2] / "tiles"
 # main.py 只在 --gui 分支 import 本模块，故 gate 不传 --gui 时不强制 pygame。
 import pygame
 
+# M30 交互式瞄准模式：控制层视图状态（不属于 Game）。renderer 只读它画光标准星，
+# 不写它（与 self.effects 同性质，#8 延伸）。aim_state 在 src/rogue/ 下、无循环导入。
+from . import aim_state
+
 
 class _NullFont:
     """字体完全不可用时的最小兜底：render 返回 1×1 透明面、get_height 给最小高度。
@@ -318,6 +322,31 @@ class PygameRenderer:
         self._using_png_sprites = False   # M27：是否成功加载了 tiles/*.png
         w = game.width * cell_size
         h = game.height * cell_size + HUD_HEIGHT
+        # pygbag/wasm：pygame 的 init 由运行时（pygame.base C 扩展就绪后）才可用。
+        # 若模块导入期（web.py 被 runpy 加载时）pygame 已被缓存成「无 init 的桩」，
+        # 这里在运行时重新加载、必要时回退到 pygame_ce 真身，把 init/display 等属性挂回（#M28）。
+        global pygame
+        if not hasattr(pygame, "init"):
+            import importlib
+            try:
+                importlib.reload(pygame)
+            except Exception:
+                pass
+        if not hasattr(pygame, "init"):
+            try:
+                import pygame_ce
+                pygame = pygame_ce
+            except Exception:
+                pass
+        if not hasattr(pygame, "init"):
+            # 诊断：若走到这里说明 pygame 真身仍未就绪，打印它到底是什么，便于排障。
+            try:
+                print("[web][DIAG] pygame 仍无 init：",
+                      "type=", type(pygame).__name__,
+                      "file=", getattr(pygame, "__file__", "?"),
+                      "has_base=", hasattr(pygame, "base"))
+            except Exception:
+                pass
         pygame.init()
         self.screen = pygame.display.set_mode((w, h))
         pygame.display.set_caption(caption)
@@ -537,7 +566,17 @@ class PygameRenderer:
             return " "
         if k == pygame.K_ESCAPE:
             return None
-        u = event.unicode
+        # wasm/pygbag 下 SDL 投递的 KEYDOWN 往往不带 unicode 字段（或为空），
+        # 用 getattr 兜底避免 AttributeError 炸掉主循环；若仍取不到字符，
+        # 再回退到 event.key 的名称（'w'/'g'/'1'…），保证 WASD/道具键在网页版一定可用（#M28 健壮性）。
+        u = getattr(event, "unicode", "")
+        if not u:
+            try:
+                name = pygame.key.name(event.key)
+                if len(name) == 1:
+                    u = name
+            except Exception:
+                u = ""
         if u:
             return u
         return None
@@ -627,11 +666,44 @@ class PygameRenderer:
         self._draw_effects()
         self._draw_spider_sense_stings()
         self._draw_vignette()
+        self._draw_aim_cursor()  # M30：瞄准模式光标准星（只读 aim_state，不写 Game）
         self._draw_hud()
         self._draw_messages()
         if self.help_shown:
             self._draw_help()
         self._prev_px, self._prev_py = game.px, game.py
+
+    def _draw_aim_cursor(self) -> None:
+        """M30：瞄准模式下画光标准星（黄色方框 + 中心十字），按几何约束给颜色提示。
+
+        只读 ``aim_state`` 与 ``game.can_toggle_switch``/``can_destroy_switch``（纯查询），
+        不写 ``Game`` 状态、不引入随机（#8 延伸 / #1 不破）。未瞄准时直接返回（零副作用）。
+        颜色：绿=可射灭射亮（can_toggle_switch）/ 红=可射碎（can_destroy_switch）/ 灰=够不着。
+        """
+        if not aim_state.is_active():
+            return
+        cur = aim_state.cursor()
+        if cur is None:
+            return
+        gx, gy = cur
+        game = self.game
+        cell = self.cell
+        px, py = gx * cell, gy * cell
+        can_toggle = game.can_toggle_switch(gx, gy)
+        can_destroy = game.can_destroy_switch(gx, gy)
+        if can_toggle:
+            border = (90, 220, 120)     # 绿：可射灭射亮
+        elif can_destroy:
+            border = (220, 80, 80)      # 红：可射碎（理论上未碎开关两个都能，这里兜底）
+        else:
+            border = (160, 160, 160)    # 灰：够不着
+        # 黄色方框边框（与绿/红区分，提示「这是光标」）+ 几何约束颜色十字
+        pygame.draw.rect(self.screen, (255, 215, 0), (px, py, cell, cell), 2)
+        # 中心十字（按几何约束上色）
+        cx, cy = px + cell // 2, py + cell // 2
+        arm = cell // 3
+        pygame.draw.line(self.screen, border, (cx - arm, cy), (cx + arm, cy), 2)
+        pygame.draw.line(self.screen, border, (cx, cy - arm), (cx, cy + arm), 2)
         self._prev_hp = getattr(game, "player_hp", 0)
         self.frame += 1
         pygame.display.flip()
@@ -1112,6 +1184,7 @@ class PygameRenderer:
                 self.draw()
                 clock.tick(fps)
         finally:
+            aim_state.reset()  # M30：游戏结束复位瞄准状态，避免跨局串扰
             pygame.quit()
 
     async def async_run(self, handle_key, fps: int = 30) -> str:
@@ -1147,6 +1220,7 @@ class PygameRenderer:
         finally:
             # 仅在正常结束（return）时退出 pygame；异常路径保留画面以便排查。
             if err is None:
+                aim_state.reset()  # M30：游戏结束复位瞄准状态，避免跨局串扰
                 pygame.quit()
 
     async def _wait_key_async(self) -> None:

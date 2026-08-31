@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import pygame  # 必须在导入 rogue.render_pygame 之前——pygbag/wasm 要求 pygame 由入口脚本先完成初始化
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
 
